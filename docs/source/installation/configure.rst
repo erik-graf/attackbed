@@ -40,3 +40,13 @@ In order to activate **ALL** configuration at once change into the ansible direc
 .. note::
 
    You need to activate the configuration everytime you want to deploy a testbed or run any scenario!
+
+Ansible hosts file
+==========================
+
+Create a `hosts` file in the `ansible` folder using the `hosts.example` file and change the public IP to the public IP of the deployed mgmt server accordingly at the following line:
+
+::
+
+    [all:vars]
+    ansible_ssh_common_args='-o ProxyCommand="ssh -o IdentitiesOnly=yes -A -p 22 -W %h:%p -q aecid@203.0.113.10"'
