@@ -44,7 +44,7 @@ In order to activate **ALL** configuration at once change into the ansible direc
 Ansible hosts file
 ==========================
 
-Additionally you can create a `hosts` file in the `ansible` folder using the `hosts.example` file and change the public IP to the public IP of the mgmt server accordingly at the following line:
+Create a `hosts` file in the `ansible` folder using the `hosts.example` file and change the public IP to the public IP of the deployed mgmt server accordingly at the following line:
 
 ::
 
