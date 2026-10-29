@@ -590,7 +590,8 @@ class HostResolver:
 
     # Return a host-specific clock skew in seconds, or zero/default if unknown.
     def resolve_clock_skew(self, host: str) -> float:
-        return self.config.hosts.get(host, HostProfile(host, self.config.default_timezone)).clock_skew_seconds
+        profile = self.config.hosts.get(host)
+        return profile.clock_skew_seconds if profile else self.config.default_clock_skew_seconds
 
     # Convert any observed host token/alias into the canonical configured host name.
     def canonicalize_host(self, host: str) -> str:
@@ -761,13 +762,16 @@ def parse_apache_nginx_timestamp(line: str, *_args) -> Optional[ParsedTimestamp]
 
 
 def parse_iso_prefix(line: str, *_args) -> Optional[ParsedTimestamp]:
-    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\s+", line)
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+", line)
     if not m:
         return None
-    parsed = parse_iso_datetime(m.group(1))
-    if not parsed:
+    raw = m.group(1)
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
         return None
-    return ParsedTimestamp(parsed, m.group(1), False, "iso-prefix")
+    naive = parsed.tzinfo is None
+    return ParsedTimestamp(parsed.replace(tzinfo=UTC) if naive else parsed.astimezone(UTC), raw, naive, "iso-prefix")
 
 
 # Parse a JSON log line and look for common timestamp fields.
@@ -786,9 +790,13 @@ def parse_json_line_timestamp(line: str, *_args) -> Optional[ParsedTimestamp]:
     for key in ("time", "timestamp", "@timestamp", "ts", "datetime", "date"):
         value = obj.get(key)
         if isinstance(value, str):
-            parsed = parse_iso_datetime(value)
-            if parsed:
-                return ParsedTimestamp(parsed, value, False, f"json:{key}")
+            try:
+                parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            naive = parsed.tzinfo is None
+            timestamp = parsed.replace(tzinfo=UTC) if naive else parsed.astimezone(UTC)
+            return ParsedTimestamp(timestamp, value, naive, f"json:{key}")
         elif isinstance(value, (int, float)):
             parsed = parse_epoch_seconds(str(value))
             if parsed:
@@ -1400,6 +1408,8 @@ def load_config(config_path: Optional[Path], discovered_hosts: dict[str, HostPro
     config.raw_config = dict(data)
     config.default_timezone = str(data.get("default_timezone", config.default_timezone))
     config.default_clock_skew_seconds = float(data.get("default_clock_skew_seconds", 0.0) or 0.0)
+    for profile in config.hosts.values():
+        profile.clock_skew_seconds = config.default_clock_skew_seconds
     hosts = data.get("hosts", {})
     if isinstance(hosts, dict):
         for host_name, host_cfg in hosts.items():
