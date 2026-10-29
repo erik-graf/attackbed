@@ -67,7 +67,7 @@ Attack timestamps with explicit offsets keep their own offset. Naive attack time
 
 The output directory contains:
 
-- `correlations.json`: full machine-readable result.
+- `correlations.json`: all attack steps, matched host-log events, and correlations (with total processed-event counts).
 - `correlations.csv`: flat table for spreadsheets.
 - `correlations_human.txt`: text report for review.
 - `summary.json`: counts and run metadata.

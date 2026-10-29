@@ -2102,6 +2102,7 @@ def write_human_summary(path: Path, attacks: list[Attack], correlations: list[Co
 def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], events: list[LogEvent], correlations: list[Correlation]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     write_generated_config(out_dir / "host_config.generated.json", config)
+    matched_event_ids = {c.event_id for c in correlations}
     write_json(
         out_dir / "correlations.json",
         {
@@ -2115,7 +2116,7 @@ def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], e
                 "created_at": dt.datetime.now(tz=UTC).isoformat(),
             },
             "attacks": [attack_summary_row(a) for a in attacks],
-            "events": [event_summary_row(e) for e in events],
+            "events": [event_summary_row(e) for e in events if e.event_id in matched_event_ids],
             "correlations": [correlation_row(c) for c in correlations],
         },
     )
@@ -2141,7 +2142,8 @@ def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], e
             },
         )
         write_correlation_csv(host_dir / "correlations.csv", rows)
-        write_human_summary(host_dir / "correlations_human.txt", attacks, rows)
+        relevant_attack_ids = {c.attack_id for c in rows}
+        write_human_summary(host_dir / "correlations_human.txt", [a for a in attacks if a.attack_id in relevant_attack_ids], rows)
         host_summary[host] = {"correlation_count": len(rows)}
 
     write_json(
