@@ -57,10 +57,12 @@ from __future__ import annotations
 
 # Standard-library imports only: the script has no third-party dependency.
 import argparse
+from bisect import bisect_left
 import csv
 import curses
 import dataclasses
 import datetime as dt
+import functools
 import ipaddress
 import json
 import math
@@ -68,11 +70,12 @@ import pprint as pp
 import re
 import shlex
 import subprocess
+import tempfile
 import sys
 import traceback
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 # All internally comparable timestamps are normalized to UTC.  The script may
@@ -1563,12 +1566,16 @@ def load_attack_file(path: Path, resolver: HostResolver, attack_root: Optional[P
 # Convert a binary systemd journal file to text using journalctl.
 # The rest of the parser only handles text lines, so binary journals are
 # normalized through this external command first.
-def run_journalctl_export(path: Path) -> list[str]:
+def run_journalctl_export(path: Path) -> Iterator[str]:
     cmd = ["journalctl", f"--file={path}", "-o", "short-iso-precise", "--no-pager"]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "journalctl failed")
-    return result.stdout.splitlines()
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as errors:
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors, text=True) as proc:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                yield line.rstrip("\n")
+            if proc.wait() != 0:
+                errors.seek(0)
+                raise RuntimeError(errors.read().strip() or "journalctl failed")
 
 
 def file_starts_with_systemd_journal_magic(path: Path) -> bool:
@@ -1581,7 +1588,8 @@ def file_starts_with_systemd_journal_magic(path: Path) -> bool:
 
 def is_probably_binary_file(path: Path) -> bool:
     try:
-        sample = path.read_bytes()[:BINARY_SAMPLE_BYTES]
+        with path.open("rb") as fh:
+            sample = fh.read(BINARY_SAMPLE_BYTES)
     except Exception:
         return False
     if not sample:
@@ -1611,8 +1619,15 @@ def should_try_journalctl(path: Path) -> bool:
 # journalctl.  Lines without parseable timestamps are skipped by default for performance.
 # If include_untimestamped=True, they are loaded so content matching can find
 # them; they receive zero time-correlation score later.
-def load_log_file(path: Path, root: Path, default_year: int, resolver: HostResolver, include_untimestamped: bool = False) -> list[LogEvent]:
+def load_log_file(
+    path: Path, root: Path, default_year: int, resolver: HostResolver,
+    include_untimestamped: bool = False, *, attack_times: Optional[list[dt.datetime]] = None,
+    window_before: float = 0.0, window_after: float = 0.0,
+    stats: Optional[dict[str, int]] = None,
+) -> list[LogEvent]:
     events: list[LogEvent] = []
+    before_delta = dt.timedelta(seconds=window_before)
+    after_delta = dt.timedelta(seconds=window_after)
     path_host = resolver.host_from_path(path, root) or "unknown-host"
 
     def convert_line(line: str, line_number: int, source_type_override: Optional[str] = None) -> Optional[LogEvent]:
@@ -1644,6 +1659,16 @@ def load_log_file(path: Path, root: Path, default_year: int, resolver: HostResol
             raw_timestamp = ""
             parser_name = "missing"
 
+        if stats is not None:
+            stats["parsed_events"] = stats.get("parsed_events", 0) + 1
+
+        # Discard irrelevant timestamps before extracting tokens or retaining
+        # log events. The count above still includes all parsed input events.
+        if attack_times is not None and not timestamp_missing:
+            idx = bisect_left(attack_times, normalized_ts - after_delta)
+            if idx == len(attack_times) or attack_times[idx] > normalized_ts + before_delta:
+                return None
+
         source_type = source_type_override or detect_source_type(path, line)
         candidate_ips = extract_ips(line)
         candidate_tokens = extract_tokens(line)
@@ -1671,17 +1696,19 @@ def load_log_file(path: Path, root: Path, default_year: int, resolver: HostResol
     global JOURNALCTL_CONVERTED_FILE_COUNT, BINARY_LOG_FILE_SKIPPED_COUNT
 
     if should_try_journalctl(path):
+        previous_count = stats.get("parsed_events", 0) if stats is not None else 0
         try:
-            lines = run_journalctl_export(path)
+            for line_number, line in enumerate(run_journalctl_export(path), start=1):
+                ev = convert_line(line, line_number, "journalctl-export")
+                if ev:
+                    events.append(ev)
             JOURNALCTL_CONVERTED_FILE_COUNT += 1
         except Exception as exc:
             print(f"[warn] failed to export binary journal with journalctl: {path}: {exc}", file=sys.stderr)
             BINARY_LOG_FILE_SKIPPED_COUNT += 1
-            return events
-        for line_number, line in enumerate(lines, start=1):
-            ev = convert_line(line, line_number, "journalctl-export")
-            if ev:
-                events.append(ev)
+            if stats is not None:
+                stats["parsed_events"] = previous_count
+            return []
         return events
 
     if is_probably_binary_file(path):
@@ -1709,11 +1736,23 @@ def load_all_attacks(attack_root: Path, resolver: HostResolver, config: Optional
 
 
 # Load every discovered host-log file, warning and continuing if one file fails.
-def load_all_events(log_root: Path, attack_root: Optional[Path], default_year: int, resolver: HostResolver, include_untimestamped: bool = False) -> list[LogEvent]:
+def load_all_events(
+    log_root: Path, attack_root: Optional[Path], default_year: int, resolver: HostResolver,
+    include_untimestamped: bool = False, *, attacks: Optional[list[Attack]] = None,
+    window_before: float = 60.0, window_after: float = 240.0,
+    stats: Optional[dict[str, int]] = None,
+) -> list[LogEvent]:
     events: list[LogEvent] = []
+    attack_times = sorted(a.timestamp for a in attacks) if attacks is not None else None
     for path in discover_log_files(log_root, attack_root):
         try:
-            events.extend(load_log_file(path, log_root, default_year, resolver, include_untimestamped))
+            events.extend(load_log_file(
+                path, log_root, default_year, resolver, include_untimestamped,
+                attack_times=attack_times,
+                window_before=min(window_before, MAX_TIME_DELTA_SECONDS),
+                window_after=min(window_after, MAX_TIME_DELTA_SECONDS),
+                stats=stats,
+            ))
         except Exception:
             print(f"[warn] failed to read log file: {path}", file=sys.stderr)
     return sorted(events, key=lambda x: x.timestamp)
@@ -2119,7 +2158,12 @@ def write_human_summary(path: Path, attacks: list[Attack], correlations: list[Co
             fh.write("\n" + "-" * 100 + "\n\n")
 # Write all output artifacts: global JSON/CSV/text, generated config, per-host
 # JSON/CSV/text files, and a small summary JSON.
-def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], events: list[LogEvent], correlations: list[Correlation]) -> None:
+def export_outputs(
+    out_dir: Path, config: ConfigBundle, attacks: list[Attack],
+    events: list[LogEvent], correlations: list[Correlation],
+    processed_event_count: Optional[int] = None,
+) -> None:
+    event_count = len(events) if processed_event_count is None else processed_event_count
     out_dir.mkdir(parents=True, exist_ok=True)
     write_generated_config(out_dir / "host_config.generated.json", config)
     matched_event_ids = {c.event_id for c in correlations}
@@ -2128,7 +2172,8 @@ def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], e
         {
             "summary": {
                 "attack_count": len(attacks),
-                "event_count": len(events),
+                "event_count": event_count,
+                "candidate_event_count": len(events),
                 "correlation_count": len(correlations),
                 "unparsable_lines": UNPARSABLE_LINE_COUNT,
                 "journalctl_converted_files": JOURNALCTL_CONVERTED_FILE_COUNT,
@@ -2170,7 +2215,8 @@ def export_outputs(out_dir: Path, config: ConfigBundle, attacks: list[Attack], e
         out_dir / "summary.json",
         {
             "attacks": len(attacks),
-            "events": len(events),
+            "events": event_count,
+            "candidate_events": len(events),
             "correlations": len(correlations),
             "unparsable_lines": UNPARSABLE_LINE_COUNT,
             "journalctl_converted_files": JOURNALCTL_CONVERTED_FILE_COUNT,
@@ -2202,6 +2248,7 @@ def sanitize_preview_text(value: str) -> str:
 
 # Read a small window of source-file lines around a matched log line for preview.
 # This powers the ncurses UI and human-readable context display.
+@functools.lru_cache(maxsize=256)
 def read_context_lines(path: str, line_number: int, radius: int = 3) -> list[str]:
     p = Path(path)
     if not p.exists() or not p.is_file():
@@ -3179,13 +3226,19 @@ def main() -> int:
     # normalized into Attack and LogEvent objects.
     attacks = load_all_attacks(attack_root, resolver, config=config)
     # attacks may reveal additional hostnames via IP mapping in config; reload not necessary
-    events = load_all_events(log_root, attack_root, args.default_year, resolver, include_untimestamped=args.process_untimestamped_lines)
+    stats: dict[str, int] = {}
+    events = load_all_events(
+        log_root, attack_root, args.default_year, resolver,
+        include_untimestamped=args.process_untimestamped_lines,
+        attacks=attacks, window_before=args.window_before, window_after=args.window_after, stats=stats,
+    )
     correlations = correlate(attacks, events, args.window_before, args.window_after, args.max_per_attack)
-    export_outputs(out_dir, config, attacks, events, correlations)
+    export_outputs(out_dir, config, attacks, events, correlations, processed_event_count=stats.get("parsed_events", 0))
 
     summary = {
         "attacks": len(attacks),
-        "events": len(events),
+        "events": stats.get("parsed_events", 0),
+        "candidate_events": len(events),
         "correlations": len(correlations),
         "unparsable_lines": UNPARSABLE_LINE_COUNT,
         "journalctl_converted_files": JOURNALCTL_CONVERTED_FILE_COUNT,
