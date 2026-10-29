@@ -87,7 +87,7 @@ CURRENT_YEAR_FALLBACK = dt.datetime.now().year
 # before scoring.  This makes time correlation extremely strict for timestamped
 # events.  Events with no parseable timestamp bypass this cap and receive a time
 # score of zero instead.
-MAX_TIME_DELTA_SECONDS = 0.3
+MAX_TIME_DELTA_SECONDS = 5.0
 
 # Sentinel used internally for log lines that do not contain a parseable
 # timestamp.  The real signal for these rows is extra["timestamp_missing"], not
@@ -1238,7 +1238,7 @@ def content_overlap_score(attack: Attack, event: LogEvent) -> tuple[float, dict[
 
     ip_hits = 0
     for ip_text in attack.target_ips:
-        if ip_text in event.raw_line or ip_text in event.message:
+        if ip_text in event.candidate_ips:
             ip_hits += 1
     if ip_hits:
         val = min(IP_LITERAL_MAX, IP_LITERAL_BASE + IP_LITERAL_PER_HIT * ip_hits)
@@ -1339,6 +1339,16 @@ def relevance_threshold(correlation: Correlation) -> bool:
     # source-type-only matches are discarded even if their total score would have
     # crossed one of the thresholds below.
     if not has_lexical_match(correlation):
+        return False
+
+    # Outside the immediate execution window, one command word alone is too
+    # weak: require a second command term or matching target/IP evidence.
+    has_target_evidence = bool(correlation.target_host_matches) or bool(
+        {"ip_literal_match", "network_match"} & breakdown_keys
+    )
+    if (correlation.abs_delta_seconds > 1.0
+            and len(set(correlation.matched_command_terms)) < 2
+            and not has_target_evidence):
         return False
 
     # A binary match passes the threshold, but only after the lexical gate above.
@@ -3111,8 +3121,8 @@ def main() -> int:
     global MAX_TIME_DELTA_SECONDS
 
     args = parse_args()
-    if args.max_time_delta < 0:
-        print("[error] --max-time-delta must be non-negative", file=sys.stderr)
+    if args.max_time_delta < 0 or args.window_before < 0 or args.window_after < 0 or args.max_per_attack <= 0:
+        print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
         return 2
     MAX_TIME_DELTA_SECONDS = float(args.max_time_delta)
 

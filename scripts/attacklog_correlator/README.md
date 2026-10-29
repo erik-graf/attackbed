@@ -23,7 +23,7 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 ## Important options
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
-- `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `0.3`.
+- `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.
 - `--default-timezone`: timezone for naive host-log timestamps.
 - `--window-before` / `--window-after`: broad correlation time window around each attack.
 - `--max-per-attack`: maximum saved correlations per attack step.
