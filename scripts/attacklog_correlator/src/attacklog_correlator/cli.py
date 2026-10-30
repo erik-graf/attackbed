@@ -2337,8 +2337,7 @@ def _preview_keywords(corr: Optional[Correlation]) -> list[str]:
     # lexical gate: green in host-log context means "this exact attack-log token
     # is why the correlation survived", not merely "this word appeared somewhere
     # in the attack JSON".
-    matched_terms = [sanitize_host_name(x) for x in getattr(corr, "matched_lexical_terms", []) or []]
-    matched_terms = [x for x in matched_terms if x]
+    matched_terms = [str(x).strip().lower() for x in getattr(corr, "matched_lexical_terms", []) or [] if str(x).strip()]
     if matched_terms:
         out: list[str] = []
         for term in matched_terms:
@@ -2547,11 +2546,13 @@ def build_preview_lines(corr: Optional[Correlation], collapsed: bool = True) -> 
             lines.append(f"  ... {len(breakdown) - 5} more scoring details hidden")
 
     lines.append("Matched log line:")
-    focus_line = read_context_lines(corr.event_file, corr.event_line, radius=0)
-    lines.extend(focus_line or ["[missing matched line]"])
+    focus_line = [] if corr.event_source_type == "journalctl-export" else read_context_lines(corr.event_file, corr.event_line, radius=0)
+    if not focus_line or focus_line[0].startswith(("[missing file]", "[unable to preview]")):
+        focus_line = [f">{corr.event_line:6d} {sanitize_preview_text(corr.event_message)}"]
+    lines.extend(focus_line)
     lines.append("------------------")
     lines.append("Context:")
-    context = read_context_lines(corr.event_file, corr.event_line, radius=2 if collapsed else 6)
+    context = [] if corr.event_source_type == "journalctl-export" else read_context_lines(corr.event_file, corr.event_line, radius=2 if collapsed else 6)
     if context:
         if focus_line:
             context = [x for x in context if x not in focus_line]
@@ -2640,6 +2641,17 @@ def _merge_spans(spans: list[tuple[int, int, str]]) -> list[tuple[int, int, str]
     return merged
 
 
+# Match the same visible tokens the lexical scorer recognizes, rather than
+# substring fragments (or a partial IPv4 address) within unrelated words.
+def _lexical_highlight_spans(line: str, keywords: list[str]) -> list[tuple[int, int]]:
+    wanted = {str(term).lower() for term in keywords if term}
+    spans = [m.span() for m in HOST_TOKEN_RE.finditer(line) if sanitize_host_name(m.group()) in wanted]
+    for match in re.finditer(r"(?<![A-Za-z0-9_.:-])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_.:-])", line):
+        if match.group() in wanted:
+            spans.append(match.span())
+    return spans
+
+
 # Render one curses line with both attack-keyword and semantic highlighting.
 # It walks through the merged spans and writes normal/highlighted chunks in order.
 def _render_semantic_highlighted_line(
@@ -2659,18 +2671,7 @@ def _render_semantic_highlighted_line(
     safe = sanitize_preview_text(line)
     spans: list[tuple[int, int, str]] = []
 
-    lowered = safe.lower()
-    ordered = sorted([k for k in keywords if k], key=len, reverse=True)
-    for kw in ordered:
-        kw_l = kw.lower()
-        pos = 0
-        while pos < len(safe):
-            idx = lowered.find(kw_l, pos)
-            if idx == -1:
-                break
-            end = idx + len(kw)
-            spans.append((idx, end, "green"))
-            pos = end
+    spans.extend((start, end, "green") for start, end in _lexical_highlight_spans(safe, keywords))
 
     for s_idx, e_idx in forced_green_spans or []:
         spans.append((max(0, s_idx), min(len(safe), e_idx), "green"))
@@ -2864,35 +2865,35 @@ class CorrelationBrowser:
         except Exception:
             win.box()
 
-        rendered: list[tuple[str, bool, Optional[tuple[int, int]]]] = []
+        rendered: list[tuple[str, list[tuple[int, int]]]] = []
         previous_blank = False
+        event_line_next = False
+        keywords = keywords or []
         for line in lines:
             safe_line = sanitize_preview_text(line)
-            is_hostlog_line = bool(re.match(r"^[ >]\s*\d+\s", safe_line))
-            command_value_start = len("Command: ") if safe_line.startswith("Command: ") else None
+            is_evidence = (
+                bool(re.match(r"^[ >]\s*\d+\s", safe_line))
+                or safe_line.startswith(("Command: ", "Matched command tokens: ", "Matched metadata tokens: "))
+                or event_line_next
+            )
+            event_line_next = safe_line == "Event:"
             if safe_line == "":
                 if not previous_blank:
-                    rendered.append(("", False, None))
+                    rendered.append(("", []))
                 previous_blank = True
                 continue
             previous_blank = False
+            green_spans = _lexical_highlight_spans(safe_line, keywords) if is_evidence else []
             start_idx = 0
-            # Manual wrapping: curses does not automatically wrap safely inside
-            # our boxed pane, so long lines are sliced to the pane width.  Keep
-            # a side-band flag saying whether the slice came from an actual
-            # host-log context line; only those slices may receive green
-            # attack-token highlighting.  The Command line is special: its
-            # command value is original attack-log text, so it should be green
-            # in the preview even though it is not a host-log context line.
+            # Find matches on the complete line so wrapping cannot split a
+            # lexical token into two unhighlighted fragments.
             while start_idx < len(safe_line):
                 end_idx = start_idx + inner_width
-                forced_green: Optional[tuple[int, int]] = None
-                if command_value_start is not None:
-                    local_start = max(0, command_value_start - start_idx)
-                    local_end = min(inner_width, len(safe_line) - start_idx)
-                    if local_start < local_end:
-                        forced_green = (local_start, local_end)
-                rendered.append((safe_line[start_idx:end_idx], is_hostlog_line, forced_green))
+                local_spans = [
+                    (max(0, start - start_idx), min(inner_width, end - start_idx))
+                    for start, end in green_spans if start < end_idx and end > start_idx
+                ]
+                rendered.append((safe_line[start_idx:end_idx], local_spans))
                 start_idx += inner_width
 
         if top < 0:
@@ -2904,33 +2905,25 @@ class CorrelationBrowser:
         status = f" {title} [{top + 1}-{min(len(rendered), top + max_rows)}/{max(len(rendered), 1)}] "
         win.addnstr(0, 2, status, width - 4, curses.A_BOLD | border_attr)
 
-        keywords = keywords or []
-
         for i in range(max_rows):
             idx = top + i
             if idx >= len(rendered):
                 break
-            rendered_text, is_hostlog_line, forced_green = rendered[idx]
+            rendered_text, green_spans = rendered[idx]
             rendered_line = rendered_text.ljust(inner_width)
-            # Host-log context lines receive green attack-token matches.  The
-            # Command line gets a forced green span for the original attack
-            # command value.  Other preview text can still receive blue syntax
-            # or bold search highlighting, but not green lexical highlighting.
-            line_keywords = keywords if is_hostlog_line else []
-            forced_green_spans = [forced_green] if forced_green else None
             _render_semantic_highlighted_line(
                 win,
                 i + 1,
                 1,
                 inner_width,
                 rendered_line,
-                line_keywords,
+                [],
                 getattr(self, "preview_blue_attr", curses.A_BOLD),
                 getattr(self, "preview_green_attr", curses.A_BOLD),
                 getattr(self, "preview_bold_attr", curses.A_BOLD),
                 search_query,
                 search_encoding,
-                forced_green_spans,
+                green_spans,
             )
         return top
 
@@ -2946,13 +2939,13 @@ class CorrelationBrowser:
             curses.init_pair(1, curses.COLOR_GREEN, -1)
             curses.init_pair(2, curses.COLOR_BLUE, -1)
             curses.init_pair(3, curses.COLOR_RED, -1)  # Active-pane border.
-            self.preview_green_attr = curses.color_pair(1) | curses.A_BOLD
+            self.preview_green_attr = curses.color_pair(1) | curses.A_BOLD | curses.A_REVERSE
             self.preview_blue_attr = curses.color_pair(2) | curses.A_BOLD
             self.preview_bold_attr = curses.A_BOLD | curses.A_REVERSE
             self.correlation_highlight_attr = curses.color_pair(2) | curses.A_BOLD
             self.selected_pane_border_attr = curses.color_pair(3) | curses.A_BOLD
         except Exception:
-            self.preview_green_attr = curses.A_BOLD
+            self.preview_green_attr = curses.A_BOLD | curses.A_REVERSE
             self.preview_blue_attr = curses.A_BOLD
             self.preview_bold_attr = curses.A_BOLD | curses.A_REVERSE
             self.correlation_highlight_attr = curses.A_BOLD
