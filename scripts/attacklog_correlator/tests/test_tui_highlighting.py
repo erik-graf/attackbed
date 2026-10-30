@@ -12,6 +12,13 @@ def test_only_exact_lexical_tokens_are_highlighted():
     assert cli._lexical_highlight_spans("src:10.0.0.5", ["10.0.0.5"]) == [(4, 12)]
 
 
+def test_www_highlights_host_components_without_matching_longer_words():
+    line = "user=www-data url=https://www.example.org/ www WWW wwwroot"
+    spans = cli._lexical_highlight_spans(line, ["www"])
+    assert [line[start:end] for start, end in spans] == ["www", "www", "www", "WWW"]
+    assert cli._preview_keywords(SimpleNamespace(matched_lexical_terms=["www"])) == ["www"]
+
+
 def test_short_binary_name_match_is_highlighted_without_substrings():
     line = "comm=nc ncat kernel session"
     assert cli._lexical_highlight_spans(line, ["nc"]) == [(5, 7)]

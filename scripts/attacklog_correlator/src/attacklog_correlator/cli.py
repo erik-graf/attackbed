@@ -2654,10 +2654,14 @@ def _lexical_highlight_spans(line: str, keywords: list[str]) -> list[tuple[int, 
         if match.group() in wanted:
             spans.append(match.span())
     for term in wanted:
-        if len(term) < 3:
-            pattern = r"(?<![A-Za-z0-9_.-])" + re.escape(term) + r"(?![A-Za-z0-9_.-])"
-            spans.extend(m.span() for m in re.finditer(pattern, line, flags=re.I))
-    return spans
+        if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", term):
+            continue  # IPs need stricter boundaries to avoid partial addresses.
+        boundary = "A-Za-z0-9_.-" if len(term) < 3 else "A-Za-z0-9"
+        pattern = rf"(?<![{boundary}])" + re.escape(term) + rf"(?![{boundary}])"
+        for match in re.finditer(pattern, line, flags=re.I):
+            if not any(start <= match.start() and match.end() <= end for start, end in spans):
+                spans.append(match.span())
+    return sorted(spans)
 
 
 # Render one curses line with both attack-keyword and semantic highlighting.
