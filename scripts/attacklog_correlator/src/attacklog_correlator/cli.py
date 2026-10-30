@@ -3216,6 +3216,9 @@ def main() -> int:
     if history_path is not None:
         if not history_path.is_absolute():
             history_path = out_dir.parent / history_path
+        if history_path.suffix.lower() != ".jsonl":
+            print("[error] --history must point to a .jsonl file, not an existing JSON/CSV report", file=sys.stderr)
+            return 2
         if history_path.resolve() == (out_dir / "summary.json").resolve():
             print("[error] --history cannot append to output/summary.json", file=sys.stderr)
             return 2

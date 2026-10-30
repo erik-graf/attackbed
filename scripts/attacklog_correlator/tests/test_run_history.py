@@ -36,3 +36,12 @@ def test_history_flag_accepts_default_and_explicit_path(monkeypatch):
     assert cli.parse_args().history == "results.jsonl"
     monkeypatch.setattr(sys, "argv", ["attacklog-correlator", "--root", "work"])
     assert cli.parse_args().history is None
+
+
+def test_history_does_not_corrupt_json_exports(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "attacklog-correlator", "--root", str(tmp_path),
+        "--history", "output/correlations.json", "--no-ui",
+    ])
+    assert cli.main() == 2
+    assert not (tmp_path / "output" / "correlations.json").exists()
