@@ -63,6 +63,7 @@ import curses
 import dataclasses
 import datetime as dt
 import functools
+import hashlib
 import ipaddress
 import json
 import math
@@ -77,6 +78,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo
+
+from .metadata import __version__
 
 # All internally comparable timestamps are normalized to UTC.  The script may
 # parse local/naive timestamps first, but correlation only makes sense once
@@ -3138,8 +3141,45 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also load log lines with no parseable timestamp for content-only scoring; slower on noisy logs",
     )
+    p.add_argument(
+        "--history", nargs="?", const="run-history.jsonl", metavar="FILE",
+        help="Append version, settings and summary.json to FILE (default: <root>/run-history.jsonl)",
+    )
     p.add_argument("--no-ui", action="store_true", help="Write outputs only")
     return p.parse_args()
+
+
+def append_run_history(path: Path, summary_path: Path, args: argparse.Namespace) -> None:
+    """Append one complete JSON Lines record without rewriting older runs."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        revision = result.stdout.strip() if result.returncode == 0 else None
+    except OSError:
+        revision = None
+
+    entry = {
+        "correlator_version": __version__,
+        "git_revision": revision,
+        "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "settings": {
+            "root": str(Path(args.root).expanduser().resolve()),
+            "host_config": args.host_config,
+            "default_timezone": args.default_timezone,
+            "default_year": args.default_year,
+            "window_before": args.window_before,
+            "window_after": args.window_after,
+            "max_time_delta": args.max_time_delta,
+            "max_per_attack": args.max_per_attack,
+            "process_untimestamped_lines": args.process_untimestamped_lines,
+        },
+        "summary": json.loads(summary_path.read_text(encoding="utf-8")),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def ensure_work_dirs(root: Path) -> tuple[Path, Path, Path]:
@@ -3175,6 +3215,14 @@ def main() -> int:
 
     attack_root, log_root, out_dir = ensure_work_dirs(Path(args.root))
     host_config_path = Path(args.host_config).expanduser().resolve() if args.host_config else None
+    history_path = Path(args.history).expanduser() if args.history is not None else None
+    if history_path is not None:
+        if not history_path.is_absolute():
+            history_path = out_dir.parent / history_path
+        if history_path.resolve() == (out_dir / "summary.json").resolve():
+            print("[error] --history cannot append to output/summary.json", file=sys.stderr)
+            return 2
+
 
     if args.view_existing:
         attacks, correlations, saved_summary = load_existing_outputs(out_dir)
@@ -3234,6 +3282,13 @@ def main() -> int:
     )
     correlations = correlate(attacks, events, args.window_before, args.window_after, args.max_per_attack)
     export_outputs(out_dir, config, attacks, events, correlations, processed_event_count=stats.get("parsed_events", 0))
+    if history_path is not None:
+        try:
+            append_run_history(history_path, out_dir / "summary.json", args)
+        except OSError as exc:
+            print(f"[error] failed to append run history: {exc}", file=sys.stderr)
+            return 1
+
 
     summary = {
         "attacks": len(attacks),

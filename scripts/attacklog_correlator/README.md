@@ -29,6 +29,7 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 - `--max-per-attack`: maximum saved correlations per attack step.
 - `--process-untimestamped-lines`: opt in to loading lines that have no parseable timestamp. By default, those lines are counted but skipped for performance.
 - `--view-existing`: open `correlations.json` from the working directory's `output` subdirectory without recomputing.
+- `--history [FILE]`: append a JSON Lines record per computation, including package version, Git revision (when available), source checksum, scoring settings and a copy of `summary.json`. With no FILE argument, writes to `<root>/run-history.jsonl`; relative FILE paths are resolved under `--root`. No entry is appended in `--view-existing` mode.
 
 ## Host and attacker timezone config
 
@@ -62,6 +63,16 @@ The generated config can be edited and reused with `--host-config`:
 ```
 
 Attack timestamps with explicit offsets keep their own offset. Naive attack timestamps are interpreted using the matching attacker timezone.
+
+Keep a versioned run history:
+
+```bash
+uv run attacklog-correlator --root /path/to/workdir --history --no-ui
+# Or share one history file across workdirs:
+uv run attacklog-correlator --root /path/to/workdir --history /path/to/history.jsonl --no-ui
+```
+
+Each line is a separate JSON object. Inspect it with `jq -s '.' /path/to/workdir/run-history.jsonl`. The history contains summary statistics, not full matched log records.
 
 ## Outputs
 
