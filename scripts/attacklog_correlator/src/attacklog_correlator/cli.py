@@ -2653,6 +2653,10 @@ def _lexical_highlight_spans(line: str, keywords: list[str]) -> list[tuple[int, 
     for match in re.finditer(r"(?<![A-Za-z0-9_.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_.])", line):
         if match.group() in wanted:
             spans.append(match.span())
+    for term in wanted:
+        if len(term) < 3:
+            pattern = r"(?<![A-Za-z0-9_.-])" + re.escape(term) + r"(?![A-Za-z0-9_.-])"
+            spans.extend(m.span() for m in re.finditer(pattern, line, flags=re.I))
     return spans
 
 

@@ -12,6 +12,11 @@ def test_only_exact_lexical_tokens_are_highlighted():
     assert cli._lexical_highlight_spans("src:10.0.0.5", ["10.0.0.5"]) == [(4, 12)]
 
 
+def test_short_binary_name_match_is_highlighted_without_substrings():
+    line = "comm=nc ncat kernel session"
+    assert cli._lexical_highlight_spans(line, ["nc"]) == [(5, 7)]
+
+
 def test_preview_keeps_original_matched_term():
     corr = SimpleNamespace(matched_lexical_terms=["script.log"], attack_raw_line="")
     assert cli._preview_keywords(corr) == ["script.log"]
