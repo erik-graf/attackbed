@@ -8,6 +8,8 @@ def test_only_exact_lexical_tokens_are_highlighted():
     line = 'comm="curl" script.log curlycurl src=10.0.0.5 dst=10.0.0.50'
     spans = cli._lexical_highlight_spans(line, ["curl", "script", "10.0.0.5"])
     assert [line[start:end] for start, end in spans] == ["curl", "script.log", "10.0.0.5"]
+    assert cli._lexical_highlight_spans("script.log", ["script.log"]) == [(0, 10)]
+    assert cli._lexical_highlight_spans("src:10.0.0.5", ["10.0.0.5"]) == [(4, 12)]
 
 
 def test_preview_keeps_original_matched_term():

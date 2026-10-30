@@ -64,6 +64,8 @@ The generated config can be edited and reused with `--host-config`:
 
 Attack timestamps with explicit offsets keep their own offset. Naive attack timestamps are interpreted using the matching attacker timezone.
 
+## Run history
+
 Keep a versioned run history:
 
 ```bash

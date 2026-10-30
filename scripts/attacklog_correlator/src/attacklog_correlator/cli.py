@@ -79,7 +79,11 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo
 
-from .metadata import __version__
+try:
+    from .metadata import __version__
+except ImportError:  # Also support running cli.py directly.
+    from metadata import __version__
+
 
 # All internally comparable timestamps are normalized to UTC.  The script may
 # parse local/naive timestamps first, but correlation only makes sense once
@@ -2645,8 +2649,8 @@ def _merge_spans(spans: list[tuple[int, int, str]]) -> list[tuple[int, int, str]
 # substring fragments (or a partial IPv4 address) within unrelated words.
 def _lexical_highlight_spans(line: str, keywords: list[str]) -> list[tuple[int, int]]:
     wanted = {str(term).lower() for term in keywords if term}
-    spans = [m.span() for m in HOST_TOKEN_RE.finditer(line) if sanitize_host_name(m.group()) in wanted]
-    for match in re.finditer(r"(?<![A-Za-z0-9_.:-])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_.:-])", line):
+    spans = [m.span() for m in HOST_TOKEN_RE.finditer(line) if m.group().lower() in wanted or sanitize_host_name(m.group()) in wanted]
+    for match in re.finditer(r"(?<![A-Za-z0-9_.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9_.])", line):
         if match.group() in wanted:
             spans.append(match.span())
     return spans
