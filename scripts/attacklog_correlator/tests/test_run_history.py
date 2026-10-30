@@ -21,7 +21,19 @@ def test_history_appends_summaries_and_identifies_source(tmp_path, monkeypatch):
         summary_path.write_text(json.dumps({"correlations": count, "created_at": "2026-10-30T12:00:00Z"}))
         cli.append_run_history(history, summary_path, args)
 
-    records = [json.loads(line) for line in history.read_text().splitlines()]
+    content = history.read_text()
+    assert content.startswith("{\n  \"correlator_version\":")
+    assert content.count("\n\n{") == 1
+
+    # Pretty-printed objects are whitespace-separated JSON, not strict JSON Lines.
+    decoder = json.JSONDecoder()
+    records = []
+    index = 0
+    while index < len(content):
+        record, index = decoder.raw_decode(content, index)
+        records.append(record)
+        while index < len(content) and content[index].isspace():
+            index += 1
     assert [r["summary"]["correlations"] for r in records] == [2, 3]
     assert all(r["correlator_version"] == __version__ for r in records)
     assert all(r["git_revision"] == "0123456789abcdef" for r in records)
@@ -45,3 +57,21 @@ def test_history_does_not_corrupt_json_exports(tmp_path, monkeypatch):
     ])
     assert cli.main() == 2
     assert not (tmp_path / "output" / "correlations.json").exists()
+
+
+def test_history_can_append_to_older_single_line_history(tmp_path, monkeypatch):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text('{"correlations": 2}', encoding="utf-8")
+    history = tmp_path / "run-history.jsonl"
+    history.write_text('{"summary":{"correlations":1}}\n', encoding="utf-8")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *_a, **_kw: argparse.Namespace(returncode=1, stdout=""))
+    args = argparse.Namespace(
+        root=str(tmp_path), host_config=None, default_timezone="UTC",
+        default_year=2026, window_before=60, window_after=240,
+        max_time_delta=5, max_per_attack=30, process_untimestamped_lines=False,
+    )
+    cli.append_run_history(history, summary_path, args)
+    content = history.read_text(encoding="utf-8")
+    assert content.startswith('{"summary":{"correlations":1}}\n\n{\n')
+    assert len(json.JSONDecoder().raw_decode(content, content.index("{", content.index("}") + 1))[0]) > 1
+    assert content.endswith("\n")

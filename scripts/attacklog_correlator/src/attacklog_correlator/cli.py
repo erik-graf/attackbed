@@ -3151,7 +3151,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def append_run_history(path: Path, summary_path: Path, args: argparse.Namespace) -> None:
-    """Append one complete JSON Lines record without rewriting older runs."""
+    """Append a pretty-printed JSON object, separated from previous runs."""
     try:
         result = subprocess.run(
             ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
@@ -3180,7 +3180,8 @@ def append_run_history(path: Path, summary_path: Path, args: argparse.Namespace)
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        separator = "\n" if fh.tell() else ""
+        fh.write(separator + json.dumps(entry, indent=2, ensure_ascii=False) + "\n")
 
 
 def ensure_work_dirs(root: Path) -> tuple[Path, Path, Path]:
