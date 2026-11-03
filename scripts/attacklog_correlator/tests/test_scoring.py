@@ -1,11 +1,12 @@
+from attacklog_correlator import correlation as correlation_module
+from attacklog_correlator import models as models_module
 import datetime as dt
 
-from attacklog_correlator import cli
 
 
 def _correlation_with_breakdown(breakdown):
-    now = dt.datetime(2026, 1, 1, tzinfo=cli.UTC)
-    return cli.Correlation(
+    now = dt.datetime(2026, 1, 1, tzinfo=models_module.UTC)
+    return models_module.Correlation(
         correlation_id="attack|event",
         attack_id="attack",
         event_id="event",
@@ -36,8 +37,8 @@ def test_relevance_threshold_rejects_no_lexical_evidence():
     corr = _correlation_with_breakdown({"time_proximity": 40.0, "target_host_exact": 45.0})
     corr.matched_lexical_terms = []
 
-    assert cli.has_lexical_match(corr) is False
-    assert cli.relevance_threshold(corr) is False
+    assert correlation_module.has_lexical_match(corr) is False
+    assert correlation_module.relevance_threshold(corr) is False
 
 
 def test_relevance_threshold_allows_command_lexical_evidence():
@@ -45,8 +46,8 @@ def test_relevance_threshold_allows_command_lexical_evidence():
     corr.matched_lexical_terms = ["payload"]
     corr.matched_command_terms = ["payload"]
 
-    assert cli.has_lexical_match(corr) is True
-    assert cli.relevance_threshold(corr) is True
+    assert correlation_module.has_lexical_match(corr) is True
+    assert correlation_module.relevance_threshold(corr) is True
 
 
 def test_relevance_threshold_rejects_metadata_only_evidence():
@@ -55,5 +56,5 @@ def test_relevance_threshold_rejects_metadata_only_evidence():
     corr.matched_metadata_terms = ["dhcp"]
     corr.matched_command_terms = []
 
-    assert cli.has_lexical_match(corr) is False
-    assert cli.relevance_threshold(corr) is False
+    assert correlation_module.has_lexical_match(corr) is False
+    assert correlation_module.relevance_threshold(corr) is False

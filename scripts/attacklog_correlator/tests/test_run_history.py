@@ -1,8 +1,9 @@
+from attacklog_correlator import cli as cli_module
+from attacklog_correlator import output as output_module
 import argparse
 import json
 import sys
 
-from attacklog_correlator import cli
 from attacklog_correlator.metadata import __version__
 
 
@@ -10,7 +11,7 @@ def test_history_appends_summaries_and_identifies_source(tmp_path, monkeypatch):
     summary_path = tmp_path / "output" / "summary.json"
     summary_path.parent.mkdir()
     history = tmp_path / "run-history.jsonl"
-    monkeypatch.setattr(cli.subprocess, "run", lambda *_a, **_kw: argparse.Namespace(returncode=0, stdout="0123456789abcdef\n"))
+    monkeypatch.setattr(output_module.subprocess, "run", lambda *_a, **_kw: argparse.Namespace(returncode=0, stdout="0123456789abcdef\n"))
 
     args = argparse.Namespace(
         root=str(tmp_path), host_config=None, default_timezone="UTC",
@@ -19,7 +20,7 @@ def test_history_appends_summaries_and_identifies_source(tmp_path, monkeypatch):
     )
     for count in (2, 3):
         summary_path.write_text(json.dumps({"correlations": count, "created_at": "2026-10-30T12:00:00Z"}))
-        cli.append_run_history(history, summary_path, args)
+        output_module.append_run_history(history, summary_path, args)
 
     content = history.read_text()
     assert content.startswith("{\n  \"correlator_version\":")
@@ -43,11 +44,11 @@ def test_history_appends_summaries_and_identifies_source(tmp_path, monkeypatch):
 
 def test_history_flag_accepts_default_and_explicit_path(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["attacklog-correlator", "--root", "work", "--history"])
-    assert cli.parse_args().history == "run-history.jsonl"
+    assert cli_module.parse_args().history == "run-history.jsonl"
     monkeypatch.setattr(sys, "argv", ["attacklog-correlator", "--root", "work", "--history", "results.jsonl"])
-    assert cli.parse_args().history == "results.jsonl"
+    assert cli_module.parse_args().history == "results.jsonl"
     monkeypatch.setattr(sys, "argv", ["attacklog-correlator", "--root", "work"])
-    assert cli.parse_args().history is None
+    assert cli_module.parse_args().history is None
 
 
 def test_history_does_not_corrupt_json_exports(tmp_path, monkeypatch):
@@ -55,7 +56,7 @@ def test_history_does_not_corrupt_json_exports(tmp_path, monkeypatch):
         "attacklog-correlator", "--root", str(tmp_path),
         "--history", "output/correlations.json", "--no-ui",
     ])
-    assert cli.main() == 2
+    assert cli_module.main() == 2
     assert not (tmp_path / "output" / "correlations.json").exists()
 
 
@@ -64,13 +65,13 @@ def test_history_can_append_to_older_single_line_history(tmp_path, monkeypatch):
     summary_path.write_text('{"correlations": 2}', encoding="utf-8")
     history = tmp_path / "run-history.jsonl"
     history.write_text('{"summary":{"correlations":1}}\n', encoding="utf-8")
-    monkeypatch.setattr(cli.subprocess, "run", lambda *_a, **_kw: argparse.Namespace(returncode=1, stdout=""))
+    monkeypatch.setattr(output_module.subprocess, "run", lambda *_a, **_kw: argparse.Namespace(returncode=1, stdout=""))
     args = argparse.Namespace(
         root=str(tmp_path), host_config=None, default_timezone="UTC",
         default_year=2026, window_before=60, window_after=240,
         max_time_delta=5, max_per_attack=30, process_untimestamped_lines=False,
     )
-    cli.append_run_history(history, summary_path, args)
+    output_module.append_run_history(history, summary_path, args)
     content = history.read_text(encoding="utf-8")
     assert content.startswith('{"summary":{"correlations":1}}\n\n{\n')
     assert len(json.JSONDecoder().raw_decode(content, content.index("{", content.index("}") + 1))[0]) > 1

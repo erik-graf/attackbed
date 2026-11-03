@@ -1,8 +1,12 @@
+from attacklog_correlator import attacks as attacks_module
+from attacklog_correlator import config as config_module
+from attacklog_correlator import correlation as correlation_module
+from attacklog_correlator import events as events_module
+from attacklog_correlator import output as output_module
 """Synthetic AttackMate-style log fixtures exercising the complete pipeline."""
 import json
 from pathlib import Path
 
-from attacklog_correlator import cli
 
 
 def test_pipeline_preserves_only_known_correlations(tmp_path: Path):
@@ -33,14 +37,14 @@ def test_pipeline_preserves_only_known_correlations(tmp_path: Path):
         encoding="utf-8",
     )
 
-    config = cli.ConfigBundle(
+    config = config_module.ConfigBundle(
         default_timezone="UTC", default_clock_skew_seconds=0.0,
-        hosts={"target": cli.HostProfile("target", "UTC", ip_addresses=["10.0.0.5"])},
+        hosts={"target": config_module.HostProfile("target", "UTC", ip_addresses=["10.0.0.5"])},
     )
-    resolver = cli.HostResolver(config)
-    attacks = cli.load_all_attacks(root / "attacklogs", resolver, config)
-    events = cli.load_all_events(root / "hostlogs", root / "attacklogs", 2026, resolver)
-    correlations = cli.correlate(attacks, events, 60, 240, 30)
+    resolver = config_module.HostResolver(config)
+    attacks = attacks_module.load_all_attacks(root / "attacklogs", resolver, config)
+    events = events_module.load_all_events(root / "hostlogs", root / "attacklogs", 2026, resolver)
+    correlations = correlation_module.correlate(attacks, events, 60, 240, 30)
 
     assert len(attacks) == 2
     assert len(events) == 4
@@ -48,12 +52,12 @@ def test_pipeline_preserves_only_known_correlations(tmp_path: Path):
     assert {c.attacker_host for c in correlations} == {"attacker-a"}
 
     out = root / "output"
-    cli.export_outputs(out, config, attacks, events, correlations)
+    output_module.export_outputs(out, config, attacks, events, correlations)
     data = json.loads((out / "correlations.json").read_text(encoding="utf-8"))
     assert data["summary"]["event_count"] == 4
     assert {row["line_number"] for row in data["events"]} == {1, 4}
     assert {row["event_line"] for row in data["correlations"]} == {1, 4}
 
-    saved_attacks, saved_correlations, _summary = cli.load_existing_outputs(out)
+    saved_attacks, saved_correlations, _summary = output_module.load_existing_outputs(out)
     assert len(saved_attacks) == 2
     assert len(saved_correlations) == 2

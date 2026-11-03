@@ -1,10 +1,13 @@
+from attacklog_correlator import cli as cli_module
+from attacklog_correlator import correlation as correlation_module
+from attacklog_correlator import models as models_module
+from attacklog_correlator import tui as tui_module
 
 
 def test_json_schema_keys_do_not_become_lexical_matches():
     import datetime as dt
-    from attacklog_correlator import cli
 
-    attack = cli.Attack(
+    attack = models_module.Attack(
         attack_id="a1",
         timestamp=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
         attack_type="execution",
@@ -15,7 +18,7 @@ def test_json_schema_keys_do_not_become_lexical_matches():
         raw_line='{"type":"execution","cmd":"sudo nmcli device set wlan1 managed"}',
         attacker_host="attacker",
     )
-    event = cli.LogEvent(
+    event = models_module.LogEvent(
         event_id="e1",
         timestamp=attack.timestamp,
         raw_timestamp="",
@@ -30,12 +33,11 @@ def test_json_schema_keys_do_not_become_lexical_matches():
         candidate_ips=[],
     )
 
-    assert "type" not in cli.extract_attack_lexical_terms(attack)
-    assert cli.lexical_overlap_score(attack, event)[2] == []
+    assert "type" not in correlation_module.extract_attack_lexical_terms(attack)
+    assert correlation_module.lexical_overlap_score(attack, event)[2] == []
 
 
 def test_parse_args_accepts_max_time_delta(monkeypatch):
-    from attacklog_correlator import cli
 
     monkeypatch.setattr(
         "sys.argv",
@@ -48,17 +50,16 @@ def test_parse_args_accepts_max_time_delta(monkeypatch):
         ],
     )
 
-    args = cli.parse_args()
+    args = cli_module.parse_args()
     assert args.root == "work"
     assert args.max_time_delta == 2.5
 
 
 def test_tui_starts_on_attacks_and_arrows_switch_panes(monkeypatch):
-    from attacklog_correlator import cli
 
     class FakeScreen:
         def __init__(self):
-            self.keys = [cli.curses.KEY_RIGHT, cli.curses.KEY_LEFT, ord("q")]
+            self.keys = [tui_module.curses.KEY_RIGHT, tui_module.curses.KEY_LEFT, ord("q")]
 
         def keypad(self, _enabled):
             pass
@@ -82,7 +83,7 @@ def test_tui_starts_on_attacks_and_arrows_switch_panes(monkeypatch):
             return self.keys.pop(0)
 
     active_panes = []
-    browser = cli.CorrelationBrowser([], [])
+    browser = tui_module.CorrelationBrowser([], [])
 
     def record_list(_win, title, _rows, _selected, top, **_kwargs):
         if title.startswith("> "):
@@ -94,11 +95,11 @@ def test_tui_starts_on_attacks_and_arrows_switch_panes(monkeypatch):
             active_panes.append("Preview")
         return top
 
-    monkeypatch.setattr(cli.curses, "curs_set", lambda _visibility: None)
-    monkeypatch.setattr(cli.curses, "start_color", lambda: None)
-    monkeypatch.setattr(cli.curses, "use_default_colors", lambda: None)
-    monkeypatch.setattr(cli.curses, "init_pair", lambda *_args: None)
-    monkeypatch.setattr(cli.curses, "color_pair", lambda _pair: 0)
+    monkeypatch.setattr(tui_module.curses, "curs_set", lambda _visibility: None)
+    monkeypatch.setattr(tui_module.curses, "start_color", lambda: None)
+    monkeypatch.setattr(tui_module.curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(tui_module.curses, "init_pair", lambda *_args: None)
+    monkeypatch.setattr(tui_module.curses, "color_pair", lambda _pair: 0)
     monkeypatch.setattr(browser, "_draw_list", record_list)
     monkeypatch.setattr(browser, "_draw_text", record_preview)
 

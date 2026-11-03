@@ -1,7 +1,9 @@
+from attacklog_correlator import config as config_module
+from attacklog_correlator.ingestion import readers as ingestion_readers_module
+from attacklog_correlator import output as output_module
 import json
 from pathlib import Path
 
-from attacklog_correlator import cli
 
 
 def test_discover_hosts_uses_only_top_level_host_folder_for_hints(tmp_path: Path):
@@ -13,7 +15,7 @@ def test_discover_hosts_uses_only_top_level_host_folder_for_hints(tmp_path: Path
     fileshare_log.write_text("", encoding="utf-8")
     inetfw_log.write_text("", encoding="utf-8")
 
-    hosts = cli.discover_hosts_from_logs(log_root, None, "Europe/Vienna")
+    hosts = config_module.discover_hosts_from_logs(log_root, None, "Europe/Vienna")
 
     assert sorted(hosts) == ["fileshare", "inetfw"]
     assert hosts["fileshare"].path_hints == ["fileshare"]
@@ -26,7 +28,7 @@ def test_random_top_level_identifier_is_not_discovered_as_host(tmp_path: Path):
     random_log.parent.mkdir(parents=True)
     random_log.write_text("", encoding="utf-8")
 
-    hosts = cli.discover_hosts_from_logs(log_root, None, "Europe/Vienna")
+    hosts = config_module.discover_hosts_from_logs(log_root, None, "Europe/Vienna")
 
     assert hosts == {}
 
@@ -35,16 +37,16 @@ def test_systemd_journal_magic_is_detected_even_without_journal_suffix(tmp_path:
     path = tmp_path / "user-1000"
     path.write_bytes(b"LPKSHHRH" + b"\x00" * 32)
 
-    assert cli.file_starts_with_systemd_journal_magic(path) is True
-    assert cli.should_try_journalctl(path) is True
+    assert ingestion_readers_module.file_starts_with_systemd_journal_magic(path) is True
+    assert ingestion_readers_module.should_try_journalctl(path) is True
 
 
 def test_binary_non_journal_file_is_detected_but_not_treated_as_journal(tmp_path: Path):
     path = tmp_path / "capture.pcap"
     path.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 64)
 
-    assert cli.is_probably_binary_file(path) is True
-    assert cli.should_try_journalctl(path) is False
+    assert ingestion_readers_module.is_probably_binary_file(path) is True
+    assert ingestion_readers_module.should_try_journalctl(path) is False
 
 
 def test_load_existing_outputs_reconstructs_attacks_and_correlations(tmp_path: Path):
@@ -97,7 +99,7 @@ def test_load_existing_outputs_reconstructs_attacks_and_correlations(tmp_path: P
     }
     (out_dir / "correlations.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    attacks, correlations, summary = cli.load_existing_outputs(out_dir)
+    attacks, correlations, summary = output_module.load_existing_outputs(out_dir)
 
     assert len(attacks) == 1
     assert len(correlations) == 1
