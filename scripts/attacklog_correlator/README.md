@@ -99,3 +99,80 @@ uv sync --extra dev
 uv run python -m py_compile src/attacklog_correlator/cli.py
 uv run --extra dev pytest
 ```
+
+## Code structure
+
+The CLI and output formats are unchanged. Implementation helpers now live in
+modules instead of being imported from `cli.py`:
+
+```text
+attacklog_correlator/
+  cli.py                 arguments and orchestration
+  models.py              Attack, LogRecord, LogEvent, Correlation, RunStats
+  config.py              host profiles, aliases, timezones and clock skew
+  tokens.py              shared name/token/IP extraction rules
+  attacks.py             AttackMate loading and target enrichment
+  ingestion/
+    discovery.py         existing file-discovery rules
+    timestamps.py        existing timestamp parsers
+    readers.py           streaming text/journal LogRecords
+  events.py              host enrichment and early candidate filtering
+  correlation.py         scoring, relevance and deterministic ranking
+  output.py              serialization, saved-output loading and history
+  tui.py                 curses browser, search and highlighting
+```
+
+The reader has no attack, scoring, host-config or UI dependency. It yields full
+source lines with file/line provenance and an optional `ParsedTimestamp`.
+Naive timestamps keep their wall-clock value and `naive` flag until `events.py`
+applies the host timezone and clock skew. This happens **before** time-window
+pruning; expensive token/host-candidate extraction still happens **after** pruning.
+Discovery and timestamp recognition have not been broadened in this refactor.
+
+```python
+from contextlib import closing
+from pathlib import Path
+from attacklog_correlator.ingestion.readers import iter_log_records
+from attacklog_correlator.models import RunStats
+
+stats = RunStats()
+with closing(iter_log_records(Path("syslog"), 2026, stats=stats)) as records:
+    for record in records:
+        print(record.line_number, record.parsed_timestamp, record.raw_line)
+```
+
+The iterator preserves file order, including untimestamped records. It does not
+sort or impose a correlation window. Read/parse errors propagate; a streaming
+consumer may have seen records before an error. The correlation adapter retains
+the previous policy of discarding a failed journal's partial results. Closing a
+reader early releases its source and terminates an unfinished journal export.
+
+Runtime counters belong to a `RunStats` instance. The `max_time_delta` keyword is
+passed explicitly to candidate loading, correlation and export; changing a
+module global is no longer a supported way to configure a run. The CLI still
+defaults to five seconds, independently on every invocation. Curses is imported
+only when opening the UI, so headless use does not require it.
+
+History keeps the same fields and pretty-printed append format. `source_sha256`
+now covers all package `.py` files and their relative paths in sorted order,
+including ingestion, scoring and TUI changes; it is no longer a checksum of
+`cli.py` alone. Old history entries remain readable but used the old hash scope.
+
+This is the boundary for later LogReach functionality, not a LogReach integration:
+no new parser fallbacks, inspection commands, dependencies or shared package
+were added. Scoring and display matching remain deliberately distinct policies.
+
+### Refactor regression checks
+
+The original 51 tests are retained with imports/patch targets updated to their
+owning modules. Four additional end-to-end cases compare fingerprints of the
+complete output set against fixes commit `0ada3ee`: default/strict time limits,
+untimestamped processing and top-one selection. The fingerprints cover scores,
+matched terms, ordering, counters, JSON/CSV/text reports and generated config;
+only output creation times and temporary root paths are normalized.
+
+These are synthetic fixtures, not a real collected-log accuracy benchmark.
+Additional tests cover the independent streaming API, normalization before
+filtering, early cleanup, failed journals, repeated-run isolation, package-wide
+source hashing, headless imports and both Python entry points. Python 3.10 syntax
+compatibility is checked without adding dependencies.
