@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host-config", help="Optional JSON config for host timezones, skew, aliases, and IPs")
     p.add_argument("--strict", action="store_true",
                    help="Only read filenames matched by log-type rules; no automatic timestamp parser fallback")
-    p.add_argument("--log-config", help="JSON filename rules for --strict (default: bundled log_types.json)")
+    p.add_argument("--log-config", help="JSON filename rules for --strict (default: bundled logtypes.json)")
     p.add_argument("--default-timezone", default="Europe/Vienna", help="Default timezone for naive host logs")
     p.add_argument("--window-before", type=float, default=60.0, help="Seconds before attack to include")
     p.add_argument("--window-after", type=float, default=240.0, help="Seconds after attack to include")
