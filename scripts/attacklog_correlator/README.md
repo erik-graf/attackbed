@@ -24,7 +24,7 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
 - `--strict`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
-- `--log-config`: JSON filename-pattern configuration for strict mode (default: the bundled `src/attacklog_correlator/log_types.json`). This flag requires `--strict`.
+- `--log-config`: JSON filename-pattern configuration for strict mode (default: the bundled `logtypes.json`). This flag requires `--strict`.
 - `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.
 - `--default-timezone`: timezone for naive host-log timestamps.
 - `--window-before` / `--window-after`: broad correlation time window around each attack.
@@ -44,9 +44,9 @@ uv run attacklog-correlator --root /path/to/workdir --strict --no-ui
 uv run attacklog-correlator --root /path/to/workdir --strict --log-config my-log-types.json --no-ui
 ```
 
-Strict mode recursively searches `hostlogs` but reads **only files** whose **filename** matches a configured pattern. The same rule matches files under every host, e.g. both `hostlogs/web/syslog` and `hostlogs/router/syslog.1`. Rules are evaluated in order; the first matching rule determines how to parse that file. A nonmatching file is ignored, and a line the assigned parser cannot read remains untimestamped—other parsers are **not** tried. `--process-untimestamped-lines` continues to control whether those lines are scored without timing evidence.
+Strict mode recursively searches `hostlogs` but reads **only files** matching a configured filename glob (or a path glob such as `*/apache2/error.log`). The same rule matches files under every host, e.g. both `hostlogs/web/syslog` and `hostlogs/router/syslog.1`. Rules are evaluated in order; the first matching rule determines how to parse that file. A nonmatching file is ignored, and a line the assigned parser cannot read remains untimestamped—other parsers are **not** tried. `--process-untimestamped-lines` continues to control whether those lines are scored without timing evidence.
 
-Copy the bundled `src/attacklog_correlator/log_types.json` to customize the rules. Each text log type defines an ordered set of timestamp regexes with **one capture group** containing the timestamp, plus a format (`iso8601`, `epoch`, or Python `strptime`). For example:
+Copy the bundled `logtypes.json` to customize the rules. Each text log type defines an ordered set of timestamp regexes with **one capture group** containing the timestamp, plus a format (`iso8601`, `epoch`, or Python `strptime`). For example:
 
 ```json
 {
@@ -67,7 +67,7 @@ Copy the bundled `src/attacklog_correlator/log_types.json` to customize the rule
 }
 ```
 
-Patterns use case-sensitive filename globs, not paths. The first matching log type wins. Within that type, the first *successfully parsed* timestamp pattern wins; no other log types or automatic parsers are consulted. JSON lines are handled by `timestamp_key` instead of regex matching. A timestamp format without a year uses `--default-year`. Naive timestamps still pass through per-host timezone and clock-skew normalization. Compressed files are skipped in strict mode.
+Patterns use case-sensitive filename globs, with optional path globs for ambiguous filenames. The first matching log type wins. Within that type, the first *successfully parsed* timestamp pattern wins; no other log types or automatic parsers are consulted. JSON lines are handled by `timestamp_key` instead of regex matching. A timestamp format without a year uses `--default-year`. Naive timestamps still pass through per-host timezone and clock-skew normalization. Compressed files are skipped in strict mode. The default rules also cover CRON, kernel and mail syslog files, dpkg, Apache errors, FTP, Nextcloud, Suricata fast alerts and Wazuh JSON alerts; they deliberately do not select `wtmp`, `btmp`, `pacct`, `.pcap`, `stats.log`, `alerts.log`, Metasploit or RustDesk logs. Apart from journals, binary conversion is not yet implemented.
 
 ## Host and attacker timezone config
 

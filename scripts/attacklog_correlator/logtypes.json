@@ -1,0 +1,196 @@
+{
+  "log_types": [
+    {
+      "name": "syslog",
+      "patterns": [
+        "syslog",
+        "syslog.*",
+        "auth.log",
+        "auth.log.*",
+        "kern.log",
+        "kern.log.*",
+        "messages",
+        "messages.*",
+        "cron.log",
+        "cron.log.*",
+        "daemon.log",
+        "daemon.log.*",
+        "mail.log",
+        "mail.log.*",
+        "mail.err",
+        "mail.info",
+        "mail.warn"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?)(?=\\s|$)",
+          "format": "%b %d %H:%M:%S.%f"
+        },
+        {
+          "regex": "^([A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?)(?=\\s|$)",
+          "format": "%b %d %H:%M:%S"
+        },
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        },
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        }
+      ]
+    },
+    {
+      "name": "auditd",
+      "patterns": [
+        "audit.log",
+        "audit.log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "msg=audit\\(([0-9]+(?:\\.[0-9]+)?):[0-9]+\\)",
+          "format": "epoch"
+        }
+      ]
+    },
+    {
+      "name": "http-access",
+      "patterns": [
+        "access.log",
+        "access.log.*",
+        "access_log",
+        "access_log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "\\[([0-9]{1,2}/[A-Z][a-z]{2}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\\]",
+          "format": "%d/%b/%Y:%H:%M:%S %z"
+        }
+      ]
+    },
+    {
+      "name": "suricata",
+      "patterns": [
+        "suricata.log",
+        "suricata.log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}\\s+--\\s+[0-9]{2}:[0-9]{2}:[0-9]{2})",
+          "format": "%d/%m/%Y -- %H:%M:%S"
+        },
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{2}\\s+--\\s+[0-9]{2}:[0-9]{2}:[0-9]{2})",
+          "format": "%d/%m/%y -- %H:%M:%S"
+        }
+      ]
+    },
+    {
+      "name": "suricata-eve",
+      "patterns": [
+        "eve.json",
+        "eve.json.*"
+      ],
+      "timestamp_key": "timestamp"
+    },
+    {
+      "name": "docker-json",
+      "patterns": [
+        "*-json.log"
+      ],
+      "timestamp_key": "time"
+    },
+    {
+      "name": "systemd-journal",
+      "patterns": [
+        "*.journal"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        }
+      ]
+    },
+    {
+      "name": "dpkg",
+      "patterns": [
+        "dpkg.log",
+        "dpkg.log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        }
+      ]
+    },
+    {
+      "name": "apache-error",
+      "patterns": [
+        "*/apache2/error.log",
+        "*/apache2/error.log.*",
+        "*/httpd/error_log",
+        "*/httpd/error_log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "^\\[([A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)? [0-9]{4})\\]",
+          "format": "%a %b %d %H:%M:%S.%f %Y"
+        },
+        {
+          "regex": "^\\[([A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)? [0-9]{4})\\]",
+          "format": "%a %b %d %H:%M:%S %Y"
+        }
+      ]
+    },
+    {
+      "name": "ftp",
+      "patterns": [
+        "vsftpd.log",
+        "vsftpd.log.*",
+        "xferlog",
+        "xferlog.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})(?=\\s|$)",
+          "format": "%a %b %d %H:%M:%S %Y"
+        }
+      ]
+    },
+    {
+      "name": "nextcloud",
+      "patterns": [
+        "nextcloud.log",
+        "nextcloud.log.*"
+      ],
+      "timestamp_key": "time"
+    },
+    {
+      "name": "wazuh-alerts",
+      "patterns": [
+        "alerts.json",
+        "alerts.json.*"
+      ],
+      "timestamp_key": "timestamp"
+    },
+    {
+      "name": "suricata-fast",
+      "patterns": [
+        "fast.log",
+        "fast.log.*"
+      ],
+      "timestamps": [
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}-[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]+)(?=\\s|$)",
+          "format": "%m/%d/%Y-%H:%M:%S.%f"
+        },
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}-[0-9]{2}:[0-9]{2}:[0-9]{2})(?=\\s|$)",
+          "format": "%m/%d/%Y-%H:%M:%S"
+        }
+      ]
+    }
+  ]
+}

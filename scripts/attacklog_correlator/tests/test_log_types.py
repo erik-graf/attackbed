@@ -5,7 +5,7 @@ import pytest
 
 from attacklog_correlator import cli
 from attacklog_correlator.ingestion.discovery import discover_log_files
-from attacklog_correlator.ingestion.logtypes import load_log_types, matching_log_type
+from attacklog_correlator.ingestion.logtypes import DEFAULT_LOG_TYPES_FILE, load_log_types, matching_log_type
 from attacklog_correlator.ingestion.readers import iter_log_records
 
 
@@ -35,6 +35,22 @@ def test_strict_discovery_matches_log_types_across_hosts(tmp_path):
     ("eve.json", '{"timestamp":"2026-11-18T15:03:21Z"}', "2026-11-18T15:03:21+00:00", False),
     ("abc-json.log", '{"time":"2026-11-18T15:03:21Z"}', "2026-11-18T15:03:21+00:00", False),
     ("abc.journal", "2026-11-18T15:03:21.123456+01:00 host systemd[1]: hi", "2026-11-18T14:03:21.123456+00:00", False),
+    ("syslog", "2026-09-01 13:25:38 host job", "2026-09-01T13:25:38+00:00", True),
+    ("cron.log", "Nov 18 15:03:21 host CRON[12]: job", "2026-11-18T15:03:21+00:00", True),
+    ("mail.log", "Nov 18 15:03:21 host postfix: message", "2026-11-18T15:03:21+00:00", True),
+    ("dpkg.log", "2026-11-18 15:03:21 install bash", "2026-11-18T15:03:21+00:00", True),
+    ("host/var/log/apache2/error.log", "[Wed Nov 18 15:03:21.123456 2026] [core:error] message",
+     "2026-11-18T15:03:21.123456+00:00", True),
+    ("host/var/log/apache2/error.log", "[Wed Nov 18 15:03:21 2026] [core:error] message",
+     "2026-11-18T15:03:21+00:00", True),
+    ("vsftpd.log", "Wed Nov 18 15:03:21 2026 [pid 13] CONNECT",
+     "2026-11-18T15:03:21+00:00", True),
+    ("nextcloud.log", '{"time":"2026-11-18T15:03:21Z","message":"hello"}',
+     "2026-11-18T15:03:21+00:00", False),
+    ("alerts.json", '{"timestamp":"2026-11-18T15:03:21Z","rule":{}}',
+     "2026-11-18T15:03:21+00:00", False),
+    ("fast.log", "11/18/2026-15:03:21.123456 [**] alert",
+     "2026-11-18T15:03:21.123456+00:00", True),
 ])
 def test_bundled_timestamp_formats(filename, line, timestamp, naive):
     rule = matching_log_type(Path(filename), load_log_types())
@@ -108,3 +124,22 @@ def test_cli_strict_flag_names(monkeypatch):
     assert args.log_config == "types.json"
     monkeypatch.setattr("sys.argv", ["attacklog-correlator", "--root", "work"])
     assert cli.parse_args().strict is False
+
+def test_default_logtypes_path_is_at_project_root():
+    assert DEFAULT_LOG_TYPES_FILE.name == "logtypes.json"
+    assert DEFAULT_LOG_TYPES_FILE.is_file()
+
+
+@pytest.mark.parametrize("name", (
+    "wtmp", "btmp", "pacct", "lastlog", "faillog", "alerts.log", "ossec-alerts.log",
+    "stats.log", "cloud-init-output.log", "log.pcap", "accesss.log", ".bash_history",
+    "hostconfig.json", "README", "rustdesk.log", "metasploit.log",
+    "host/.msf4/error.log", "host/rustdesk/error.log",
+))
+def test_unwanted_files_not_selected_in_strict_mode(name):
+    assert matching_log_type(Path(name), load_log_types()) is None
+
+
+def test_apache_error_pattern_matches_its_service_directory():
+    assert matching_log_type(Path("host/var/log/apache2/error.log"), load_log_types()).name == "apache-error"
+    assert matching_log_type(Path("host/var/log/httpd/error_log"), load_log_types()).name == "apache-error"

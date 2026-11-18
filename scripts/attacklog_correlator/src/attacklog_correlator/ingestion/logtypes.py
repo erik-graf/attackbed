@@ -6,6 +6,7 @@ import datetime as dt
 import fnmatch
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -14,7 +15,9 @@ from attacklog_correlator.ingestion.timestamps import parse_epoch_seconds
 from attacklog_correlator.models import ParsedTimestamp, UTC
 
 
-DEFAULT_LOG_TYPES_FILE = Path(__file__).resolve().parents[1] / "log_types.json"
+SOURCE_LOG_TYPES_FILE = Path(__file__).resolve().parents[2] / "logtypes.json"
+DEFAULT_LOG_TYPES_FILE = (SOURCE_LOG_TYPES_FILE if SOURCE_LOG_TYPES_FILE.is_file()
+                          else Path(sys.prefix) / "share/attacklog-correlator/logtypes.json")
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,8 @@ class LogTypeRule:
     def matches(self, path: Path) -> bool:
         # shortcut: compressed archives need a decoder; skip them until one is added.
         return (path.suffix.lower() not in {".gz", ".xz", ".bz2", ".zst"}
-                and any(fnmatch.fnmatchcase(path.name, pattern) for pattern in self.patterns))
+                and any(fnmatch.fnmatchcase(path.as_posix() if "/" in pattern else path.name, pattern)
+                        for pattern in self.patterns))
 
     def parse_timestamp(self, line: str, default_year: int) -> Optional[ParsedTimestamp]:
         if self.timestamp_key:
