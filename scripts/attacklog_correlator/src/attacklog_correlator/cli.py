@@ -208,7 +208,6 @@ def main() -> int:
         "journalctl_converted_files": stats.journalctl_converted_files,
         "binary_log_files_skipped": stats.binary_log_files_skipped,
         "untimestamped_lines_loaded": args.process_untimestamped_lines,
-        "manual": args.manual,
         "strict": args.strict,
         "log_config": str(Path(args.log_config).expanduser().resolve()) if args.log_config else None,
         "attack_root": str(attack_root),
