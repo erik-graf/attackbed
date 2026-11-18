@@ -23,8 +23,8 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 ## Important options
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
-- `--strict-log-types`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
-- `--log-types-file`: JSON filename-pattern configuration for strict mode (default: the bundled `src/attacklog_correlator/log_types.json`). This flag requires `--strict-log-types`.
+- `--strict`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
+- `--log-config`: JSON filename-pattern configuration for strict mode (default: the bundled `src/attacklog_correlator/log_types.json`). This flag requires `--strict`.
 - `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.
 - `--default-timezone`: timezone for naive host-log timestamps.
 - `--window-before` / `--window-after`: broad correlation time window around each attack.
@@ -35,33 +35,39 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 
 ## Log-type configuration
 
-Without `--strict-log-types`, the correlator keeps its previous recursive file discovery and per-line timestamp parsing behavior. It does not consult the log-type configuration.
+Without `--strict`, the correlator keeps its previous recursive file discovery and per-line timestamp parsing behavior. It does not consult the log-type configuration.
 
 For a predictable selection of host logs, enable strict mode:
 
 ```bash
-uv run attacklog-correlator --root /path/to/workdir --strict-log-types --no-ui
-uv run attacklog-correlator --root /path/to/workdir --strict-log-types --log-types-file my-log-types.json --no-ui
+uv run attacklog-correlator --root /path/to/workdir --strict --no-ui
+uv run attacklog-correlator --root /path/to/workdir --strict --log-config my-log-types.json --no-ui
 ```
 
 Strict mode recursively searches `hostlogs` but reads **only files** whose **filename** matches a configured pattern. The same rule matches files under every host, e.g. both `hostlogs/web/syslog` and `hostlogs/router/syslog.1`. Rules are evaluated in order; the first matching rule determines how to parse that file. A nonmatching file is ignored, and a line the assigned parser cannot read remains untimestamped—other parsers are **not** tried. `--process-untimestamped-lines` continues to control whether those lines are scored without timing evidence.
 
-Copy the bundled `src/attacklog_correlator/log_types.json` if you want to customize it. For example:
+Copy the bundled `src/attacklog_correlator/log_types.json` to customize the rules. Each text log type defines an ordered set of timestamp regexes with **one capture group** containing the timestamp, plus a format (`iso8601`, `epoch`, or Python `strptime`). For example:
 
 ```json
 {
   "log_types": [
-    {"name": "syslog", "patterns": ["syslog", "syslog.*", "auth.log"], "parser": "syslog"},
-    {"name": "auditd", "patterns": ["audit.log", "audit.log.*"], "parser": "audit"},
-    {"name": "suricata-eve", "patterns": ["eve.json"], "parser": "json", "timestamp_key": "timestamp"},
-    {"name": "custom", "patterns": ["service-*.txt"], "parser": "regex",
-     "timestamp_regex": "time=(\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2})",
-     "datetime_format": "%Y/%m/%d %H:%M:%S"}
+    {
+      "name": "syslog",
+      "patterns": ["syslog", "syslog.*"],
+      "timestamps": [
+        {"regex": "^([A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\\s+", "format": "%b %d %H:%M:%S"},
+        {"regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z|[+-][0-9]{2}:[0-9]{2}))\\s+", "format": "iso8601"}
+      ]
+    },
+    {"name": "auditd", "patterns": ["audit.log"], "timestamps": [
+      {"regex": "audit\\(([0-9]+(?:\\.[0-9]+)?):[0-9]+\\)", "format": "epoch"}
+    ]},
+    {"name": "suricata-eve", "patterns": ["eve.json"], "timestamp_key": "timestamp"}
   ]
 }
 ```
 
-`patterns` uses case-sensitive filename globs (`*`, `?`, `[0-9]`) rather than absolute paths. Available parsers are `syslog`, `audit`, `access`, `suricata`, `iso`, `json`, and `regex`. JSON rules require a `timestamp_key`; regex rules require a capture group in `timestamp_regex` and an explicit Python `strptime` `datetime_format`. For JSON timestamps with a non-ISO textual format, `datetime_format` can also be specified. Naive timestamps continue through the correlator's existing per-host timezone and clock-skew normalization. Compressed logs (`.gz`, `.xz`, `.bz2`, `.zst`) are skipped in strict mode because the reader does not decompress them. The bundled rules cover common log types, but are intentionally not universal; adapt them to your datasets.
+Patterns use case-sensitive filename globs, not paths. The first matching log type wins. Within that type, the first *successfully parsed* timestamp pattern wins; no other log types or automatic parsers are consulted. JSON lines are handled by `timestamp_key` instead of regex matching. A timestamp format without a year uses `--default-year`. Naive timestamps still pass through per-host timezone and clock-skew normalization. Compressed files are skipped in strict mode.
 
 ## Host and attacker timezone config
 

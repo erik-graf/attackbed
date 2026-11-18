@@ -44,9 +44,9 @@ def parse_args() -> argparse.Namespace:
         help="Load out-dir/correlations.json and open the browser without recomputing correlations",
     )
     p.add_argument("--host-config", help="Optional JSON config for host timezones, skew, aliases, and IPs")
-    p.add_argument("--strict-log-types", action="store_true",
+    p.add_argument("--strict", action="store_true",
                    help="Only read filenames matched by log-type rules; no automatic timestamp parser fallback")
-    p.add_argument("--log-types-file", help="JSON filename rules for --strict-log-types (default: bundled log_types.json)")
+    p.add_argument("--log-config", help="JSON filename rules for --strict (default: bundled log_types.json)")
     p.add_argument("--default-timezone", default="Europe/Vienna", help="Default timezone for naive host logs")
     p.add_argument("--window-before", type=float, default=60.0, help="Seconds before attack to include")
     p.add_argument("--window-after", type=float, default=240.0, help="Seconds after attack to include")
@@ -99,8 +99,8 @@ def main() -> int:
         print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
         return 2
 
-    if args.log_types_file and not args.strict_log_types:
-        print("[error] --log-types-file requires --strict-log-types", file=sys.stderr)
+    if args.log_config and not args.strict:
+        print("[error] --log-config requires --strict", file=sys.stderr)
         return 2
     attack_root, log_root, out_dir = ensure_work_dirs(Path(args.root))
     host_config_path = Path(args.host_config).expanduser().resolve() if args.host_config else None
@@ -137,9 +137,9 @@ def main() -> int:
         return 0
 
     log_types = None
-    if args.strict_log_types:
+    if args.strict:
         try:
-            log_types = load_log_types(Path(args.log_types_file).expanduser() if args.log_types_file else None)
+            log_types = load_log_types(Path(args.log_config).expanduser() if args.log_config else None)
         except (OSError, ValueError) as exc:
             print(f"[error] failed to load log-type rules: {exc}", file=sys.stderr)
             return 2
@@ -203,8 +203,8 @@ def main() -> int:
         "journalctl_converted_files": stats.journalctl_converted_files,
         "binary_log_files_skipped": stats.binary_log_files_skipped,
         "untimestamped_lines_loaded": args.process_untimestamped_lines,
-        "strict_log_types": args.strict_log_types,
-        "log_types_file": str(Path(args.log_types_file).expanduser().resolve()) if args.log_types_file else None,
+        "strict": args.strict,
+        "log_config": str(Path(args.log_config).expanduser().resolve()) if args.log_config else None,
         "attack_root": str(attack_root),
         "log_root": str(log_root),
         "out_dir": str(out_dir),

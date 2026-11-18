@@ -337,8 +337,8 @@ def append_run_history(path: Path, summary_path: Path, args: argparse.Namespace)
     except OSError:
         revision = None
 
-    strict_log_types = getattr(args, "strict_log_types", False)
-    rules_file = Path(getattr(args, "log_types_file", None) or DEFAULT_LOG_TYPES_FILE).expanduser()
+    strict = getattr(args, "strict", False)
+    rules_file = Path(getattr(args, "log_config", None) or DEFAULT_LOG_TYPES_FILE).expanduser()
     entry = {
         "correlator_version": __version__,
         "git_revision": revision,
@@ -353,9 +353,9 @@ def append_run_history(path: Path, summary_path: Path, args: argparse.Namespace)
             "max_time_delta": args.max_time_delta,
             "max_per_attack": args.max_per_attack,
             "process_untimestamped_lines": args.process_untimestamped_lines,
-            "strict_log_types": strict_log_types,
-            "log_types_file": str(rules_file.resolve()) if strict_log_types else None,
-            "log_types_sha256": hashlib.sha256(rules_file.read_bytes()).hexdigest() if strict_log_types else None,
+            "strict": strict,
+            "log_config": str(rules_file.resolve()) if strict else None,
+            "log_types_sha256": hashlib.sha256(rules_file.read_bytes()).hexdigest() if strict else None,
         },
         "summary": json.loads(summary_path.read_text(encoding="utf-8")),
     }

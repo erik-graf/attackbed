@@ -12,7 +12,20 @@
         "messages",
         "messages.*"
       ],
-      "parser": "syslog"
+      "timestamps": [
+        {
+          "regex": "^([A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?)(?=\\s|$)",
+          "format": "%b %d %H:%M:%S.%f"
+        },
+        {
+          "regex": "^([A-Z][a-z]{2}\\s+[0-9]{1,2}\\s+[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?)(?=\\s|$)",
+          "format": "%b %d %H:%M:%S"
+        },
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        }
+      ]
     },
     {
       "name": "auditd",
@@ -20,7 +33,12 @@
         "audit.log",
         "audit.log.*"
       ],
-      "parser": "audit"
+      "timestamps": [
+        {
+          "regex": "msg=audit\\(([0-9]+(?:\\.[0-9]+)?):[0-9]+\\)",
+          "format": "epoch"
+        }
+      ]
     },
     {
       "name": "http-access",
@@ -30,7 +48,12 @@
         "access_log",
         "access_log.*"
       ],
-      "parser": "access"
+      "timestamps": [
+        {
+          "regex": "\\[([0-9]{1,2}/[A-Z][a-z]{2}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\\]",
+          "format": "%d/%b/%Y:%H:%M:%S %z"
+        }
+      ]
     },
     {
       "name": "suricata",
@@ -38,7 +61,16 @@
         "suricata.log",
         "suricata.log.*"
       ],
-      "parser": "suricata"
+      "timestamps": [
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{4}\\s+--\\s+[0-9]{2}:[0-9]{2}:[0-9]{2})",
+          "format": "%d/%m/%Y -- %H:%M:%S"
+        },
+        {
+          "regex": "^([0-9]{1,2}/[0-9]{1,2}/[0-9]{2}\\s+--\\s+[0-9]{2}:[0-9]{2}:[0-9]{2})",
+          "format": "%d/%m/%y -- %H:%M:%S"
+        }
+      ]
     },
     {
       "name": "suricata-eve",
@@ -46,7 +78,6 @@
         "eve.json",
         "eve.json.*"
       ],
-      "parser": "json",
       "timestamp_key": "timestamp"
     },
     {
@@ -54,7 +85,6 @@
       "patterns": [
         "*-json.log"
       ],
-      "parser": "json",
       "timestamp_key": "time"
     },
     {
@@ -62,7 +92,12 @@
       "patterns": [
         "*.journal"
       ],
-      "parser": "iso"
+      "timestamps": [
+        {
+          "regex": "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)(?=\\s|$)",
+          "format": "iso8601"
+        }
+      ]
     }
   ]
 }

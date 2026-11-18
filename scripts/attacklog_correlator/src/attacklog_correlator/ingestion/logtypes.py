@@ -1,4 +1,4 @@
-"""Filename-based log types for optional strict ingestion."""
+"""Configured filename selection and timestamp extraction for strict ingestion."""
 
 from __future__ import annotations
 
@@ -10,35 +10,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from attacklog_correlator.ingestion.timestamps import (
-    parse_apache_nginx_timestamp,
-    parse_audit_timestamp,
-    parse_epoch_seconds,
-    parse_iso_prefix,
-    parse_suricata_timestamp,
-    parse_syslog_like,
-)
+from attacklog_correlator.ingestion.timestamps import parse_epoch_seconds
 from attacklog_correlator.models import ParsedTimestamp, UTC
 
 
 DEFAULT_LOG_TYPES_FILE = Path(__file__).resolve().parents[1] / "log_types.json"
-PARSERS = {
-    "syslog": parse_syslog_like,
-    "audit": parse_audit_timestamp,
-    "access": parse_apache_nginx_timestamp,
-    "suricata": parse_suricata_timestamp,
-    "iso": parse_iso_prefix,
-}
+
+
+@dataclass(frozen=True)
+class TimestampPattern:
+    regex: re.Pattern[str]
+    format: str
 
 
 @dataclass(frozen=True)
 class LogTypeRule:
     name: str
     patterns: tuple[str, ...]
-    parser: str
+    timestamps: tuple[TimestampPattern, ...] = ()
     timestamp_key: Optional[str] = None
-    timestamp_regex: Optional[re.Pattern[str]] = None
-    datetime_format: Optional[str] = None
 
     def matches(self, path: Path) -> bool:
         # shortcut: compressed archives need a decoder; skip them until one is added.
@@ -46,9 +36,7 @@ class LogTypeRule:
                 and any(fnmatch.fnmatchcase(path.name, pattern) for pattern in self.patterns))
 
     def parse_timestamp(self, line: str, default_year: int) -> Optional[ParsedTimestamp]:
-        if self.parser in PARSERS:
-            return PARSERS[self.parser](line, default_year)
-        if self.parser == "json":
+        if self.timestamp_key:
             try:
                 obj = json.loads(line)
             except (ValueError, TypeError):
@@ -58,34 +46,39 @@ class LogTypeRule:
             value = obj.get(self.timestamp_key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 timestamp = parse_epoch_seconds(str(value))
-                return ParsedTimestamp(timestamp, str(value), False, f"json:{self.timestamp_key}") if timestamp else None
+                return (ParsedTimestamp(timestamp, str(value), False, f"json:{self.timestamp_key}")
+                        if timestamp else None)
             if not isinstance(value, str):
                 return None
-            raw = value
-        else:
-            match = self.timestamp_regex.search(line) if self.timestamp_regex else None
-            if not match:
-                return None
-            raw = match.group(1)
-            if raw is None:
-                return None
+            return self._parsed(value, "iso8601", default_year, f"json:{self.timestamp_key}")
 
+        for pattern in self.timestamps:
+            match = pattern.regex.search(line)
+            if match:
+                result = self._parsed(match.group(1), pattern.format, default_year,
+                                      f"regex:{self.name}")
+                if result:
+                    return result
+        return None
+
+    @staticmethod
+    def _parsed(raw: str, fmt: str, default_year: int, parser_name: str) -> Optional[ParsedTimestamp]:
+        if fmt == "epoch":
+            parsed = parse_epoch_seconds(raw)
+            return ParsedTimestamp(parsed, raw, False, parser_name) if parsed else None
         try:
-            if self.datetime_format:
-                fmt = self.datetime_format
+            if fmt == "iso8601":
+                parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            else:
                 value = raw
                 if "%Y" not in fmt and "%y" not in fmt:
                     fmt, value = "%Y " + fmt, f"{default_year} {raw}"
                 parsed = dt.datetime.strptime(value, fmt)
-            else:
-                parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
             return None
         naive = parsed.tzinfo is None
-        return ParsedTimestamp(
-            parsed.replace(tzinfo=UTC) if naive else parsed.astimezone(UTC),
-            raw, naive, f"{self.parser}:{self.name}",
-        )
+        return ParsedTimestamp(parsed.replace(tzinfo=UTC) if naive else parsed.astimezone(UTC),
+                               raw, naive, parser_name)
 
 
 def matching_log_type(path: Path, rules: list[LogTypeRule]) -> Optional[LogTypeRule]:
@@ -103,35 +96,32 @@ def load_log_types(path: Optional[Path] = None) -> list[LogTypeRule]:
     for number, item in enumerate(data["log_types"], 1):
         if not isinstance(item, dict):
             raise ValueError(f"{path}: log type {number} must be an object")
-        name, patterns, parser = item.get("name"), item.get("patterns"), item.get("parser")
+        name, patterns = item.get("name"), item.get("patterns")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{path}: log type {number} needs a name")
         if not isinstance(patterns, list) or not patterns or not all(isinstance(p, str) and p for p in patterns):
             raise ValueError(f"{path}: {name}: patterns must be a non-empty list of filename globs")
-        if parser not in (*PARSERS, "json", "regex"):
-            raise ValueError(f"{path}: {name}: unknown parser {parser!r}")
-        key = item.get("timestamp_key")
-        regex = item.get("timestamp_regex")
-        fmt = item.get("datetime_format")
-        if parser == "json" and (not isinstance(key, str) or not key):
-            raise ValueError(f"{path}: {name}: json needs a timestamp_key")
-        if parser == "regex" and (not isinstance(regex, str) or not regex or not isinstance(fmt, str) or not fmt):
-            raise ValueError(f"{path}: {name}: regex needs timestamp_regex and datetime_format")
-        if parser not in ("json", "regex") and any(v is not None for v in (key, regex, fmt)):
-            raise ValueError(f"{path}: {name}: built-in parsers do not use custom timestamp fields")
-        if parser == "json" and fmt is not None and (not isinstance(fmt, str) or not fmt):
-            raise ValueError(f"{path}: {name}: datetime_format must be a non-empty string")
-        if parser == "json" and regex is not None:
-            raise ValueError(f"{path}: {name}: json does not use timestamp_regex")
-        if parser == "regex" and key is not None:
-            raise ValueError(f"{path}: {name}: regex does not use timestamp_key")
-        compiled = None
-        if regex is not None:
-            try:
-                compiled = re.compile(regex)
-            except re.error as exc:
-                raise ValueError(f"{path}: {name}: invalid timestamp_regex: {exc}") from exc
-            if compiled.groups < 1:
-                raise ValueError(f"{path}: {name}: timestamp_regex needs a capture group")
-        rules.append(LogTypeRule(name, tuple(patterns), parser, key, compiled, fmt))
+        key, formats = item.get("timestamp_key"), item.get("timestamps")
+        if (isinstance(key, str) and bool(key)) == (isinstance(formats, list) and bool(formats)):
+            raise ValueError(f"{path}: {name}: specify either timestamp_key or a non-empty timestamps list")
+        if key is not None and (not isinstance(key, str) or not key or formats is not None):
+            raise ValueError(f"{path}: {name}: invalid timestamp_key")
+        timestamps = []
+        if formats is not None:
+            if not isinstance(formats, list) or not formats:
+                raise ValueError(f"{path}: {name}: timestamps must be a non-empty list")
+            for entry in formats:
+                if not isinstance(entry, dict) or not isinstance(entry.get("regex"), str) or not isinstance(entry.get("format"), str):
+                    raise ValueError(f"{path}: {name}: each timestamp needs a regex and format")
+                try:
+                    pattern = re.compile(entry["regex"])
+                except re.error as exc:
+                    raise ValueError(f"{path}: {name}: invalid timestamp regex: {exc}") from exc
+                if pattern.groups < 1:
+                    raise ValueError(f"{path}: {name}: timestamp regex needs a capture group")
+                fmt = entry["format"]
+                if not fmt or (fmt not in ("iso8601", "epoch") and "%" not in fmt):
+                    raise ValueError(f"{path}: {name}: invalid timestamp format {fmt!r}")
+                timestamps.append(TimestampPattern(pattern, fmt))
+        rules.append(LogTypeRule(name, tuple(patterns), tuple(timestamps), key))
     return rules
