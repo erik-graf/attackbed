@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
                    help="Only read filenames matched by log-type rules; no automatic timestamp parser fallback")
     p.add_argument("--log-config", help="JSON filename rules for --strict (default: bundled logtypes.json)")
     p.add_argument("--default-timezone", default="Europe/Vienna", help="Default timezone for naive host logs")
-    p.add_argument("--window-before", type=float, default=60.0, help="Seconds before attack to include")
-    p.add_argument("--window-after", type=float, default=240.0, help="Seconds after attack to include")
+    p.add_argument("--window-before", type=float, help="Seconds before attack to include")
+    p.add_argument("--window-after", type=float, help="Seconds after attack to include")
     p.add_argument(
         "--max-time-delta",
         type=float,
@@ -96,6 +96,11 @@ def ensure_work_dirs(root: Path) -> tuple[Path, Path, Path]:
 def main() -> int:
 
     args = parse_args()
+    # Automatic correlation retains its 60s/240s defaults; manual review starts at 0s/+30s.
+    manual_before = 0.0 if args.window_before is None else args.window_before
+    manual_after = 30.0 if args.window_after is None else args.window_after
+    args.window_before = 60.0 if args.window_before is None else args.window_before
+    args.window_after = 240.0 if args.window_after is None else args.window_after
     if args.max_time_delta < 0 or args.window_before < 0 or args.window_after < 0 or args.max_per_attack <= 0:
         print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
         return 2
@@ -224,7 +229,7 @@ def main() -> int:
             browser = ManualBrowser(
                 attacks, discover_log_files(log_root, attack_root, log_types),
                 correlations, events, log_root, resolver, args.default_year,
-                args.window_before, args.window_after, out_dir, log_types,
+                manual_before, manual_after, out_dir, log_types,
             )
             print(f"[manual] selections written to {browser.run()}")
         except Exception:

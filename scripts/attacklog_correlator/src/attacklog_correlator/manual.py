@@ -6,6 +6,7 @@ import curses
 import datetime as dt
 import math
 import re
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
@@ -72,8 +73,64 @@ def lines_in_window(
     return visible
 
 
+
+@dataclass(frozen=True)
+class IndexedTimestamp:
+    time: dt.datetime
+    line_number: int
+    raw_timestamp: str
+
+
+def index_log_file(
+    path: Path, log_root: Path, resolver: HostResolver, default_year: int,
+    log_type: Optional[LogTypeRule] = None,
+) -> list[IndexedTimestamp]:
+    """Normalize each timestamp once; keep line numbers, not full log contents."""
+    if not readers.should_try_journalctl(path) and readers.is_probably_binary_file(path):
+        return []
+    host_hint = resolver.host_from_path(path, log_root) or "unknown-host"
+    rows: list[IndexedTimestamp] = []
+    with closing(readers.iter_log_records(path, default_year, log_type=log_type)) as records:
+        for record in records:
+            if record.parsed_timestamp is None:
+                continue
+            host = resolver.canonicalize_host(guess_host_from_line(record.raw_line) or host_hint)
+            timestamp = normalize_event_time(record.parsed_timestamp, host, resolver)
+            rows.append(IndexedTimestamp(timestamp, record.line_number, record.parsed_timestamp.raw_text))
+    return sorted(rows, key=lambda row: (row.time, row.line_number))
+
+
+def indexed_lines_in_window(
+    path: Path, stamps: list[IndexedTimestamp], selected: list[IndexedTimestamp],
+) -> list[ManualLine]:
+    """Read raw text without parsing dates again; keep following continuation lines."""
+    if not selected:
+        return []
+    by_line = {item.line_number: item for item in stamps}
+    selected_numbers = {item.line_number for item in selected}
+    last_selected = max(selected_numbers)
+    if readers.should_try_journalctl(path):
+        source = closing(readers.run_journalctl_export(path))
+    else:
+        source = path.open("r", encoding="utf-8", errors="replace")
+    lines: list[ManualLine] = []
+    within_window = False
+    with source as stream:
+        for number, raw in enumerate(stream, 1):
+            stamp = by_line.get(number)
+            if stamp is not None:
+                if number > last_selected:
+                    break
+                within_window = number in selected_numbers
+            if within_window:
+                text = raw.rstrip("\r\n")
+                span = timestamp_span(text, stamp.raw_timestamp) if stamp else None
+                lines.append(ManualLine(number, text, stamp.time if stamp else None, span))
+    return lines
+
+
 class ManualBrowser:
-    """Two-pane curses browser; selections are scoped to an attack and source line."""
+    """Three-pane curses browser; selections are scoped to an attack and source line."""
 
     def __init__(
         self, attacks: list[Attack], files: list[Path], correlations: list[Correlation],
@@ -85,8 +142,11 @@ class ManualBrowser:
         self.files = files
         self.visible_files: list[Path] = []
         self._files_key: Optional[tuple] = None
-        self._file_list_cache: dict[tuple, list[Path]] = {}
         self._preferred_line: Optional[int] = None
+        self._timestamps: Optional[dict[Path, list[IndexedTimestamp]]] = None
+        self._times: dict[Path, list[dt.datetime]] = {}
+        self._window_key: Optional[tuple[float, float]] = None
+        self._window_files: list[list[Path]] = []
         self.log_root = log_root
         self.resolver = resolver
         self.default_year = default_year
@@ -94,13 +154,15 @@ class ManualBrowser:
         self.after = after
         self.log_types = log_types
         self.attack_index = 0
+        self.active_attack_index: Optional[int] = None
+        self.attack_top = 0
         self.file_index = 0
         self.line_index = 0
         self.file_top = 0
         self.line_top = 0
         self.horizontal = 0
-        self.focus = "lines"
-        self.status = ""
+        self.focus = "attacks"
+        self.status = "Select an attack and press Enter to load logs"
         self.auto_attr = curses.A_BOLD
         self.heatmap = True
         self.heat_attrs: list[int] = []
@@ -119,70 +181,97 @@ class ManualBrowser:
         self.out_dir = out_dir
         self.output_path = out_dir / f"manual_selection_{dt.datetime.now(UTC):%Y%m%dT%H%M%S%fZ}.txt"
         self._saved = False
-        self._update_files()
 
-    def _current_path(self) -> Optional[Path]:
-        return self.visible_files[self.file_index] if self.visible_files else None
+    def _index_files(self, screen=None) -> None:
+        if self._timestamps is not None:
+            return
+        if screen is not None:
+            height, width = screen.getmaxyx()
+            self._write(screen, height - 1, 0, "Indexing log timestamps (once)...", width - 1, curses.A_REVERSE)
+            screen.refresh()
+        timestamps: dict[Path, list[IndexedTimestamp]] = {}
+        errors = 0
+        for path in self.files:
+            rule = matching_log_type(path, self.log_types) if self.log_types is not None else None
+            try:
+                rows = index_log_file(path, self.log_root, self.resolver, self.default_year, rule)
+            except (OSError, RuntimeError, ValueError):
+                errors += 1
+                continue
+            if rows:
+                timestamps[path] = rows
+        self._timestamps = timestamps
+        self._times = {path: [stamp.time for stamp in stamps] for path, stamps in timestamps.items()}
+        self.status = f"Indexed {len(timestamps)} timestamped files" + (f" ({errors} unreadable)" if errors else "")
+
+    def _matching_stamps(self, path: Path, attack: Attack) -> list[IndexedTimestamp]:
+        stamps = self._timestamps[path]
+        times = self._times[path]
+        start = attack.timestamp - dt.timedelta(seconds=self.before)
+        end = attack.timestamp + dt.timedelta(seconds=self.after)
+        return stamps[bisect_left(times, start):bisect_right(times, end)]
 
     def _update_files(self) -> None:
-        """Only list files containing an actual timestamp in the current attack window."""
-        if not self.attacks:
-            self.visible_files = []
+        """Use indexed timestamps to determine visible files for every attack."""
+        if self._timestamps is None or self.active_attack_index is None:
             return
-        key = (self.attack_index, self.before, self.after)
-        if key == self._files_key:
+        key = (self.before, self.after)
+        if key != self._window_key:
+            self._window_files = []
+            for attack in self.attacks:
+                start = attack.timestamp - dt.timedelta(seconds=self.before)
+                end = attack.timestamp + dt.timedelta(seconds=self.after)
+                matching = []
+                for path in self.files:
+                    times = self._times.get(path)
+                    if times:
+                        index = bisect_left(times, start)
+                        if index < len(times) and times[index] <= end:
+                            matching.append(path)
+                self._window_files.append(matching)
+            self._window_key = key
+        current = (self.visible_files[self.file_index]
+                   if self.visible_files and self.file_index < len(self.visible_files) else None)
+        new_files = self._window_files[self.active_attack_index]
+        new_key = (self.active_attack_index, self.before, self.after)
+        if new_key == self._files_key:
             return
-        old_path = self._current_path()
-        if key not in self._file_list_cache:
-            found = []
-            for path in self.files:
-                log_type = matching_log_type(path, self.log_types) if self.log_types is not None else None
-                try:
-                    if lines_in_window(path, self.log_root, self.resolver, self.default_year,
-                                       self.attacks[self.attack_index].timestamp,
-                                       self.before, self.after, log_type, first_timestamp_only=True):
-                        found.append(path)
-                except (OSError, RuntimeError):
-                    continue
-            self._file_list_cache[key] = found
-        self.visible_files = self._file_list_cache[key]
-        self._files_key = key
-        if old_path in self.visible_files:
-            self.file_index = self.visible_files.index(old_path)
-        elif old_path is not None:
-            previous_position = self.files.index(old_path)
-            self.file_index = next((i for i, path in enumerate(self.visible_files)
-                                    if self.files.index(path) >= previous_position),
-                                   max(0, len(self.visible_files) - 1))
+        self.visible_files = new_files
+        self._files_key = new_key
+        if current in new_files:
+            self.file_index = new_files.index(current)
         else:
             self.file_index = 0
         self.file_top = 0
         self._view_key = None
 
     def _key(self, line: ManualLine) -> tuple[str, str, int]:
-        return (self.attacks[self.attack_index].attack_id, str(self.visible_files[self.file_index]), line.line_number)
+        assert self.active_attack_index is not None
+        return (self.attacks[self.active_attack_index].attack_id,
+                str(self.visible_files[self.file_index]), line.line_number)
 
     def _load_lines(self) -> None:
         self._update_files()
-        if not self.visible_files or not self.attacks:
+        if self.active_attack_index is None or not self.visible_files:
             self.lines = []
             self.distance_range = (0.0, 0.0)
             return
-        key = (self.attack_index, self.file_index, self.before, self.after)
+        key = (self.active_attack_index, self.file_index, self.before, self.after)
         if key == self._view_key:
             return
         self._view_key = key
         path = self.visible_files[self.file_index]
-        log_type = matching_log_type(path, self.log_types) if self.log_types is not None else None
         try:
-            self.lines = lines_in_window(path, self.log_root, self.resolver, self.default_year,
-                                         self.attacks[self.attack_index].timestamp,
-                                         self.before, self.after, log_type)
+            self.lines = indexed_lines_in_window(
+                path, self._timestamps[path],
+                self._matching_stamps(path, self.attacks[self.active_attack_index]),
+            )
             self.status = ""
         except (OSError, RuntimeError) as exc:
             self.lines = []
             self.status = f"Cannot read {path.name}: {exc}"
-        deltas = [abs((row.timestamp - self.attacks[self.attack_index].timestamp).total_seconds())
+        attack_time = self.attacks[self.active_attack_index].timestamp
+        deltas = [abs((row.timestamp - attack_time).total_seconds())
                   for row in self.lines if row.timestamp is not None and row.timestamp_span is not None]
         self.distance_range = (min(deltas), max(deltas)) if deltas else (0.0, 0.0)
         if self._preferred_line is not None and self.lines:
@@ -193,6 +282,17 @@ class ManualBrowser:
                                     if self._key(line) in self.automatic), 0)
         self._preferred_line = None
         self.line_top = 0
+
+    def activate_attack(self, screen=None) -> None:
+        if not self.attacks:
+            return
+        self._index_files(screen)
+        if self.active_attack_index is not None and self.lines:
+            self._preferred_line = self.lines[self.line_index].line_number
+        self.active_attack_index = self.attack_index
+        self._files_key = None
+        self._view_key = None
+        self._load_lines()
 
     def toggle_selected(self) -> None:
         self._load_lines()
@@ -207,43 +307,43 @@ class ManualBrowser:
             self.text_by_key[key] = line.text
 
     def change_window(self, seconds: float) -> None:
-        self.before = max(0.0, self.before + seconds)
-        self.after = max(0.0, self.after + seconds)
-        self._files_key = None
-        self._view_key = None
+        # Keep the before offset unchanged; +/- extends the post-attack window.
+        self.set_window(self.before, max(0.0, self.after + seconds))
 
-    def set_window(self, seconds: float) -> None:
-        if not math.isfinite(seconds) or seconds < 0:
-            raise ValueError("Window must be a non-negative number of seconds")
-        self.before = self.after = seconds
+    def set_window(self, before: float, after: float) -> None:
+        if any(not math.isfinite(value) or value < 0 for value in (before, after)):
+            raise ValueError("Time offsets must be non-negative finite seconds")
+        self.before, self.after = before, after
+        self._window_key = None
         self._files_key = None
         self._view_key = None
 
     def _prompt_window(self, screen) -> None:
         height, width = screen.getmaxyx()
-        if height < 7 or width < 35:
+        if height < 9 or width < 45:
             self.status = "Terminal too small for time-window input"
             return
-        size = min(58, width - 4)
-        popup = curses.newwin(5, size, (height - 5) // 2, (width - size) // 2)
+        popup_width = min(58, width - 4)
+        popup = curses.newwin(7, popup_width, (height - 7) // 2, (width - popup_width) // 2)
         popup.box()
-        self._write(popup, 1, 2, "Symmetric window around attack time", size - 4)
-        self._write(popup, 2, 2, "+/- seconds (Enter to apply):", size - 4)
+        self._write(popup, 1, 2, "Window relative to selected attack (seconds)", popup_width - 4)
+        self._write(popup, 2, 2, f"Before [{self.before:g}]:", popup_width - 4)
+        self._write(popup, 4, 2, f"After  [{self.after:g}]:", popup_width - 4)
         popup.refresh()
         curses.echo()
         try:
             curses.curs_set(1)
-            text = popup.getstr(3, 2, 24).decode("utf-8").strip()
+            before_text = popup.getstr(3, 2, 24).decode("utf-8").strip()
+            after_text = popup.getstr(5, 2, 24).decode("utf-8").strip()
         finally:
             curses.noecho()
             curses.curs_set(0)
-        if not text:
-            return
         try:
-            self.set_window(float(text))
-            self.status = f"Window set to +/- {self.before:g} seconds"
+            self.set_window(float(before_text) if before_text else self.before,
+                            float(after_text) if after_text else self.after)
+            self.status = f"Window: -{self.before:g}s / +{self.after:g}s"
         except ValueError:
-            self.status = "Enter a non-negative number of seconds"
+            self.status = "Enter two non-negative numbers of seconds"
 
     def save(self) -> Path:
         """Write raw selected lines, grouped by attack and source file, to one text file."""
@@ -278,25 +378,30 @@ class ManualBrowser:
         return self.output_path
 
     def handle_key(self, key: int, screen=None) -> bool:
-        """Return False to exit (saving selections), True to keep browsing."""
         if key in (ord("q"), 27):
             return False
-        if key in (ord("s"),):
+        if key == ord("s"):
             self.save()
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, 9):
-            self.focus = ("files" if key == curses.KEY_LEFT else "lines"
-                          if key == curses.KEY_RIGHT else ("files" if self.focus == "lines" else "lines"))
+        elif key == 9:
+            panes = ("attacks", "files", "lines")
+            self.focus = panes[(panes.index(self.focus) + 1) % 3]
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            panes = ("attacks", "files", "lines")
+            delta = -1 if key == curses.KEY_LEFT else 1
+            self.focus = panes[max(0, min(2, panes.index(self.focus) + delta))]
+        elif key in (10, 13, curses.KEY_ENTER):
+            if self.focus == "attacks":
+                self.activate_attack(screen)
+            elif self.focus == "files":
+                self.focus = "lines"
         elif key in (ord("n"), ord("]"), ord("p"), ord("[")) and self.attacks:
             delta = 1 if key in (ord("n"), ord("]")) else -1
-            self._load_lines()
-            self._preferred_line = self.lines[self.line_index].line_number if self.lines else None
             self.attack_index = (self.attack_index + delta) % len(self.attacks)
-            self._files_key = None
-            self._view_key = None
+            self.focus = "attacks"
         elif key in (ord("+"), ord("=")):
-            self.change_window(10.0)
+            self.change_window(10)
         elif key in (ord("-"), ord("_")):
-            self.change_window(-10.0)
+            self.change_window(-10)
         elif key == ord("t") and screen is not None:
             self._prompt_window(screen)
         elif key == ord("c"):
@@ -305,17 +410,33 @@ class ManualBrowser:
             self.horizontal = max(0, self.horizontal - 20)
         elif key in (ord("l"), ord("L")):
             self.horizontal += 20
-        elif key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j"), curses.KEY_NPAGE, curses.KEY_PPAGE):
-            delta = -1 if key in (curses.KEY_UP, ord("k")) else 1
-            if key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
-                delta = 10 if key == curses.KEY_NPAGE else -10
-            if self.focus == "files":
-                self._update_files()
-                self.file_index = max(0, min(len(self.visible_files) - 1, self.file_index + delta)) if self.visible_files else 0
-                self._preferred_line = None
+        elif key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j"),
+                     curses.KEY_NPAGE, curses.KEY_PPAGE, curses.KEY_HOME, curses.KEY_END):
+            if self.focus == "attacks":
+                total, selected = len(self.attacks), self.attack_index
+            elif self.focus == "files":
+                total, selected = len(self.visible_files), self.file_index
             else:
                 self._load_lines()
-                self.line_index = max(0, min(len(self.lines) - 1, self.line_index + delta)) if self.lines else 0
+                total, selected = len(self.lines), self.line_index
+            if not total:
+                return True
+            if key == curses.KEY_HOME:
+                selected = 0
+            elif key == curses.KEY_END:
+                selected = total - 1
+            else:
+                delta = (-10 if key == curses.KEY_PPAGE else 10 if key == curses.KEY_NPAGE
+                         else -1 if key in (curses.KEY_UP, ord("k")) else 1)
+                selected = max(0, min(total - 1, selected + delta))
+            if self.focus == "attacks":
+                self.attack_index = selected
+            elif self.focus == "files":
+                self.file_index = selected
+                self._view_key = None
+                self._preferred_line = None
+            else:
+                self.line_index = selected
         elif key == ord(" ") and self.focus == "lines":
             self.toggle_selected()
         return True
@@ -337,75 +458,84 @@ class ManualBrowser:
     def _draw(self, screen) -> None:
         height, width = screen.getmaxyx()
         screen.erase()
-        if height < 12 or width < 55:
-            self._write(screen, 0, 0, "Terminal too small (minimum 55x12)", width - 1)
+        if height < 12 or width < 70:
+            self._write(screen, 0, 0, "Terminal too small (minimum 70x12)", width - 1)
             screen.refresh()
             return
-        self._load_lines()
-        attack = self.attacks[self.attack_index] if self.attacks else None
-        title = (f"Attack {self.attack_index + 1}/{len(self.attacks)}  "
-                 f"{attack.timestamp.isoformat()}  -{self.before:g}s/+{self.after:g}s"
-                 if attack else "No AttackMate steps found")
-        self._write(screen, 0, 0, title, width - 1, curses.A_BOLD)
-        cmd, description = attack_details(attack) if attack else ("", "")
-        self._write(screen, 1, 0, "Command: " + cmd, width - 1)
-        self._write(screen, 2, 0, "Description: " + description, width - 1)
-        self._write(screen, 3, 0, "-" * (width - 1), width - 1)
+        if self.active_attack_index is not None:
+            self._load_lines()
+        attack_width = min(26, max(19, width // 5))
+        file_width = min(38, max(22, width // 4))
+        log_width = width - attack_width - file_width
+        body_height = height - 1
+        attacks_win = screen.derwin(body_height, attack_width, 0, 0)
+        files_win = screen.derwin(body_height, file_width, 0, attack_width)
+        logs_win = screen.derwin(body_height, log_width, 0, attack_width + file_width)
+        for win in (attacks_win, files_win, logs_win):
+            win.box()
+        self._write(attacks_win, 0, 2, f" Attacks ({len(self.attacks)}) ", attack_width - 4)
+        self._write(files_win, 0, 2, f" Files ({len(self.visible_files)}) ", file_width - 4)
+        self._write(logs_win, 0, 2, f" Log lines ({len(self.lines)}) ", log_width - 4)
 
-        left_width = min(38, max(20, width // 4))
-        pane_height = height - 5
-        left = screen.derwin(pane_height, left_width, 4, 0)
-        right = screen.derwin(pane_height, width - left_width, 4, left_width)
-        left.box()
-        right.box()
-        self._write(left, 0, 2, f" Files ({len(self.visible_files)}) " + ("<" if self.focus == "files" else ""), left_width - 4)
-        relative_path = self.visible_files[self.file_index].relative_to(self.log_root).as_posix() if self.visible_files else ""
-        self._write(right, 0, 2, f" {relative_path} ({len(self.lines)} lines) " + ("<" if self.focus == "lines" else ""), width - left_width - 4)
+        attack_rows = body_height - 2
+        self.attack_top = self._scroll(self.attack_index, self.attack_top, attack_rows)
+        for i in range(self.attack_top, min(len(self.attacks), self.attack_top + attack_rows)):
+            attack = self.attacks[i]
+            active = ">" if i == self.active_attack_index else " "
+            text = f"{active}{i + 1:>3} {attack.timestamp:%H:%M:%S} {attack.cmd}"
+            attr = curses.A_REVERSE if self.focus == "attacks" and i == self.attack_index else 0
+            self._write(attacks_win, i - self.attack_top + 1, 1, text, attack_width - 2, attr)
 
-        count = pane_height - 2
-        self.file_top = self._scroll(self.file_index, self.file_top, count)
-        for i in range(self.file_top, min(len(self.visible_files), self.file_top + count)):
-            rel = self.visible_files[i].relative_to(self.log_root).as_posix()
-            attr = curses.A_REVERSE if i == self.file_index and self.focus == "files" else 0
-            self._write(left, i - self.file_top + 1, 1, rel, left_width - 2, attr)
-        if not self.visible_files:
-            self._write(left, 1, 1, "No timestamped logfiles in this window", left_width - 2)
-        self.line_top = self._scroll(self.line_index, self.line_top, count)
-        smallest, largest = self.distance_range
-        for i in range(self.line_top, min(len(self.lines), self.line_top + count)):
-            row = self.lines[i]
-            key = self._key(row)
-            auto = key in self.automatic
-            selected = key in self.selected
-            marker = ("*" if selected else " ") + ("A" if auto else " ")
-            text = f"{marker} {row.line_number:>6} {row.text}"
-            attr = self.auto_attr if auto else 0
-            if selected:
-                attr |= curses.A_BOLD
-            if self.focus == "lines" and i == self.line_index:
-                attr |= curses.A_REVERSE
-            prefix = text[:10]
-            detail = text[10 + self.horizontal:]
-            y = i - self.line_top + 1
-            available = width - left_width - 2
-            self._write(right, y, 1, prefix + detail, available, attr)
-            if self.heatmap and self.heat_attrs and row.timestamp is not None and row.timestamp_span is not None:
-                distance = abs((row.timestamp - attack.timestamp).total_seconds())
-                ratio = (distance - smallest) / (largest - smallest) if largest > smallest else 0.0
-                heat_index = min(len(self.heat_attrs) - 1, int(ratio * (len(self.heat_attrs) - 1) + 0.5))
-                first = max(row.timestamp_span[0], self.horizontal)
-                last = min(row.timestamp_span[1], self.horizontal + max(0, available - 10))
-                if first < last:
-                    heat_attr = self.heat_attrs[heat_index]
-                    if self.focus == "lines" and i == self.line_index:
-                        heat_attr |= curses.A_REVERSE
-                    self._write(right, y, 11 + first - self.horizontal,
-                                row.text[first:last], last - first, heat_attr)
-        if not self.lines:
-            self._write(right, 1, 1, self.status or "No timestamped lines in this window", width - left_width - 2)
-        footer = self.status or (f"{len(self.selected)} selected | Tab panes  SPACE toggle  +/- 10s"
-                                 "  t set window  c heatmap  [ ] attacks  h/l scroll  s save  q quit")
-        self._write(screen, height - 1, 0, footer, width - 1, curses.A_REVERSE)
+        self.file_top = self._scroll(self.file_index, self.file_top, attack_rows)
+        for i in range(self.file_top, min(len(self.visible_files), self.file_top + attack_rows)):
+            name = self.visible_files[i].relative_to(self.log_root).as_posix()
+            attr = curses.A_REVERSE if self.focus == "files" and i == self.file_index else 0
+            self._write(files_win, i - self.file_top + 1, 1, name, file_width - 2, attr)
+        if self.active_attack_index is None:
+            self._write(logs_win, 1, 1, "Select an attack and press Enter", log_width - 2)
+        else:
+            attack = self.attacks[self.active_attack_index]
+            cmd, description = attack_details(attack)
+            self._write(logs_win, 1, 1, f"Time: {attack.timestamp.isoformat()}", log_width - 2)
+            self._write(logs_win, 2, 1, f"Command: {cmd}", log_width - 2)
+            self._write(logs_win, 3, 1, f"Description: {description}", log_width - 2)
+            self._write(logs_win, 4, 1, "-" * (log_width - 2), log_width - 2)
+            rows = max(1, body_height - 6)
+            self.line_top = self._scroll(self.line_index, self.line_top, rows)
+            closest, farthest = self.distance_range
+            for i in range(self.line_top, min(len(self.lines), self.line_top + rows)):
+                line = self.lines[i]
+                key = self._key(line)
+                marker = ("*" if key in self.selected else " ") + ("A" if key in self.automatic else " ")
+                text = f"{marker} {line.line_number:>6} {line.text}"
+                attr = self.auto_attr if key in self.automatic else 0
+                if key in self.selected:
+                    attr |= curses.A_BOLD
+                if self.focus == "lines" and i == self.line_index:
+                    attr |= curses.A_REVERSE
+                prefix = text[:10]
+                detail = text[10 + self.horizontal:]
+                available = log_width - 2
+                y = i - self.line_top + 5
+                self._write(logs_win, y, 1, prefix + detail, available, attr)
+                if self.heatmap and self.heat_attrs and line.timestamp is not None and line.timestamp_span is not None:
+                    distance = abs((line.timestamp - attack.timestamp).total_seconds())
+                    ratio = (distance - closest) / (farthest - closest) if farthest > closest else 0.0
+                    color = self.heat_attrs[min(len(self.heat_attrs) - 1,
+                                                int(ratio * (len(self.heat_attrs) - 1) + 0.5))]
+                    first = max(line.timestamp_span[0], self.horizontal)
+                    last = min(line.timestamp_span[1], self.horizontal + max(0, available - 10))
+                    if first < last:
+                        if self.focus == "lines" and i == self.line_index:
+                            color |= curses.A_REVERSE
+                        self._write(logs_win, y, 11 + first - self.horizontal,
+                                    line.text[first:last], last - first, color)
+            if not self.visible_files:
+                self._write(logs_win, 5, 1, "No timestamped logfiles in this window", log_width - 2)
+
+        footer = (self.status or f"{len(self.selected)} selected")
+        help_text = " Tab panes Enter load Home/End +/-10s t window c colors Space toggle s save q quit"
+        self._write(screen, height - 1, 0, footer + " |" + help_text, width - 1, curses.A_REVERSE)
         screen.refresh()
 
     def _main(self, screen) -> None:
@@ -416,13 +546,11 @@ class ManualBrowser:
             curses.use_default_colors()
             curses.init_pair(1, curses.COLOR_CYAN, -1)
             self.auto_attr = curses.color_pair(1) | curses.A_BOLD
-            # Warm -> cool: closest attack timestamps red, farthest blue.
             palette = ([196, 202, 208, 214, 220, 226, 190, 154, 118, 82, 46,
                         47, 48, 49, 50, 51, 45, 39, 33, 27, 21]
                        if curses.COLORS >= 256 and curses.COLOR_PAIRS >= 23
                        else [curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_GREEN,
                              curses.COLOR_CYAN, curses.COLOR_BLUE])
-            self.heat_attrs = []
             for index, color in enumerate(palette, 2):
                 if index >= curses.COLOR_PAIRS:
                     break

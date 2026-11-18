@@ -37,6 +37,7 @@ def make_browser(tmp_path, lines, auto_lines=(1,), attacks=None):
         attacks, [path], correlations, events, tmp_path, make_resolver(),
         2026, 60, 60, tmp_path / "output",
     )
+    browser.activate_attack()
     return browser, path
 
 
@@ -73,6 +74,7 @@ def test_auto_selected_by_default_and_space_toggles(tmp_path):
     browser._load_lines()
     assert browser._key(browser.lines[0]) in browser.selected
     assert browser._key(browser.lines[0]) in browser.automatic
+    browser.focus = "lines"
     browser.handle_key(ord(" "))
     assert not browser.selected
     browser.handle_key(ord("j"))
@@ -89,6 +91,7 @@ def test_selections_are_scoped_to_attack_and_save_raw_lines(tmp_path):
     assert len(browser.selected) == 2
     browser.toggle_selected()
     browser.handle_key(ord("n"))
+    browser.handle_key(10)
     browser._load_lines()
     assert len(browser.selected) == 1
     assert browser._key(browser.lines[0]) in browser.selected
@@ -103,11 +106,11 @@ def test_window_shortcuts_preserve_marks(tmp_path):
     browser, _path = make_browser(tmp_path, ["Nov 18 12:00:00 target event"])
     original = set(browser.selected)
     browser.handle_key(ord("+"))
-    assert (browser.before, browser.after) == (70, 70)
+    assert (browser.before, browser.after) == (60, 70)
     browser.handle_key(ord("-"))
     assert (browser.before, browser.after) == (60, 60)
     browser.change_window(-1000)
-    assert (browser.before, browser.after) == (0, 0)
+    assert (browser.before, browser.after) == (60, 0)
     assert browser.selected == original
 
 
@@ -141,11 +144,11 @@ def test_curses_panes_and_autocorrelation_marker(tmp_path):
 
     screen = Window()
     browser._draw(screen)
-    assert screen.panes[0][0] == (19, 25, 4, 0)
-    assert screen.panes[1][0] == (19, 75, 4, 25)
-    assert any("Attack 1/1" in row[2] for row in screen.writes)
+    assert screen.panes[0][0] == (23, 20, 0, 0)
+    assert screen.panes[1][0] == (23, 25, 0, 20)
+    assert screen.panes[2][0] == (23, 55, 0, 45)
     assert any("*A" in row[2] and "target event" in row[2]
-               for row in screen.panes[1][1].writes)
+               for row in screen.panes[2][1].writes)
 
 
 def test_quitting_saves_one_new_file(tmp_path, monkeypatch):
@@ -214,8 +217,8 @@ def test_attack_details_show_only_command_and_description(tmp_path):
 
     screen = Screen()
     browser._draw(screen)
-    assert (1, "Command: curl") in screen.writes
-    assert (2, "Description: Download a script") in screen.writes
+    assert (2, "Command: curl") in screen.writes
+    assert (3, "Description: Download a script") in screen.writes
     assert all('"cmd"' not in text for _row, text in screen.writes)
     assert "# Description: Download a script" in browser.save().read_text()
 
@@ -233,6 +236,7 @@ def test_file_browser_hides_files_without_timestamps_in_window(tmp_path):
     untimed.write_text("No timestamp\n")
     browser = ManualBrowser([make_attack()], [right, too_late, empty, untimed], [], [],
                             tmp_path, make_resolver(), 2026, 60, 60, tmp_path / "output")
+    browser.activate_attack()
     assert browser.visible_files == [right]
     browser.handle_key(ord("+"))
     browser._load_lines()
@@ -250,10 +254,12 @@ def test_next_attack_preserves_selected_file(tmp_path):
         path.write_text("Nov 18 12:00:00 target relevant\n")
     browser = ManualBrowser([make_attack('a'), make_attack('b')], [first, second], [], [],
                             tmp_path, make_resolver(), 2026, 60, 60, tmp_path / "output")
+    browser.activate_attack()
     browser.focus = "files"
     browser.handle_key(ord("j"))
     assert browser.visible_files[browser.file_index] == second
     browser.handle_key(ord("n"))
+    browser.handle_key(10)
     browser._load_lines()
     assert browser.visible_files[browser.file_index] == second
 
@@ -262,7 +268,7 @@ def test_popup_sets_symmetric_window_and_rejects_invalid(tmp_path, monkeypatch):
     browser, _path = make_browser(tmp_path, ["Nov 18 12:00:00 target event"])
 
     class Popup:
-        value = b"17.5"
+        values = [b"10", b"17.5"]
         def box(self):
             pass
         def addnstr(self, *_args):
@@ -270,7 +276,7 @@ def test_popup_sets_symmetric_window_and_rejects_invalid(tmp_path, monkeypatch):
         def refresh(self):
             pass
         def getstr(self, *_args):
-            return self.value
+            return self.values.pop(0)
 
     popup = Popup()
     monkeypatch.setattr(manual.curses, "newwin", lambda *_args: popup)
@@ -278,10 +284,10 @@ def test_popup_sets_symmetric_window_and_rejects_invalid(tmp_path, monkeypatch):
     monkeypatch.setattr(manual.curses, "noecho", lambda: None)
     monkeypatch.setattr(manual.curses, "curs_set", lambda *_args: None)
     browser.handle_key(ord("t"), SimpleNamespace(getmaxyx=lambda: (24, 100)))
-    assert (browser.before, browser.after) == (17.5, 17.5)
-    popup.value = b"NaN"
+    assert (browser.before, browser.after) == (10, 17.5)
+    popup.values = [b"NaN", b"20"]
     browser.handle_key(ord("t"), SimpleNamespace(getmaxyx=lambda: (24, 100)))
-    assert (browser.before, browser.after) == (17.5, 17.5)
+    assert (browser.before, browser.after) == (10, 17.5)
     assert "non-negative" in browser.status
 
 
@@ -314,7 +320,7 @@ def test_heatmap_default_red_closest_blue_farthest_and_toggle(tmp_path):
 
     screen = Window()
     browser._draw(screen)
-    right = screen.panes[1]
+    right = screen.panes[2]
     colored = [(text, attr) for _y, x, text, attr in right.writes if x >= 11 and text.startswith("Nov 18")]
     assert len(colored) == 3
     assert colored[0][1] & ~manual.curses.A_REVERSE == 101  # closest is red
@@ -325,4 +331,135 @@ def test_heatmap_default_red_closest_blue_farthest_and_toggle(tmp_path):
     assert browser.heatmap is False
     screen = Window()
     browser._draw(screen)
-    assert all(x != 11 for _y, x, _text, _attr in screen.panes[1].writes)
+    assert all(x != 11 for _y, x, _text, _attr in screen.panes[2].writes)
+
+
+def test_attack_scroll_does_not_index_until_enter_and_index_runs_once(tmp_path, monkeypatch):
+    path = tmp_path / "target" / "syslog"
+    path.parent.mkdir()
+    path.write_text("Nov 18 12:00:00 target first\nNov 18 12:00:20 target second\n")
+    browser = ManualBrowser([make_attack("first"), make_attack("second")],
+                            [path], [], [], tmp_path, make_resolver(), 2026,
+                            0, 30, tmp_path / "output")
+    calls = []
+    real_index = manual.index_log_file
+    def counting_index(*args, **kwargs):
+        calls.append(args[0])
+        return real_index(*args, **kwargs)
+    monkeypatch.setattr(manual, "index_log_file", counting_index)
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.attack_index == 1
+    browser.handle_key(manual.curses.KEY_HOME)
+    assert browser.attack_index == 0
+    assert browser.active_attack_index is None
+    assert calls == []
+    browser.handle_key(10)
+    assert browser.active_attack_index == 0
+    assert calls == [path]
+    assert browser.visible_files == [path]
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.attack_index == 1
+    assert browser.active_attack_index == 0
+    assert calls == [path]
+    browser.handle_key(10)
+    assert browser.active_attack_index == 1
+    browser.change_window(10)
+    browser._load_lines()
+    assert calls == [path]
+
+
+def test_default_manual_window_shows_no_pre_attack_lines(tmp_path):
+    browser, path = make_browser(tmp_path, [
+        "Nov 18 11:59:59 target before",
+        "Nov 18 12:00:01 target after",
+        "Nov 18 12:00:31 target late",
+    ], auto_lines=(2,))
+    browser.set_window(0, 30)
+    browser._load_lines()
+    assert [line.line_number for line in browser.lines] == [2]
+    browser.set_window(3, 30)
+    browser._load_lines()
+    assert [line.line_number for line in browser.lines] == [1, 2]
+
+
+def test_home_end_select_first_last_in_each_pane_without_activation(tmp_path):
+    attacks = [make_attack(str(i)) for i in range(5)]
+    browser, path = make_browser(tmp_path, [
+        "Nov 18 12:00:00 target first", "Nov 18 12:00:01 target second",
+        "Nov 18 12:00:02 target third",
+    ], attacks=attacks)
+    browser.focus = "attacks"
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.attack_index == 4
+    browser.handle_key(manual.curses.KEY_HOME)
+    assert browser.attack_index == 0
+    browser.focus = "lines"
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.line_index == 2
+    browser.handle_key(manual.curses.KEY_HOME)
+    assert browser.line_index == 0
+    assert browser.active_attack_index == 0
+
+
+def test_indexed_lines_include_context_and_preserve_actual_timestamp(tmp_path):
+    path = tmp_path / "target" / "syslog"
+    path.parent.mkdir()
+    path.write_text("Nov 18 11:50:00 target early\nNov 18 12:00:00 target current\ncontinued\nNov 18 12:01:00 target late\n")
+    resolver = make_resolver()
+    stamps = manual.index_log_file(path, tmp_path, resolver, 2026)
+    selected = [r for r in stamps if r.time == make_attack().timestamp]
+    rows = manual.indexed_lines_in_window(path, stamps, selected)
+    assert [r.line_number for r in rows] == [2, 3]
+    assert rows[0].timestamp == make_attack().timestamp
+    assert rows[0].timestamp_span == (0, len("Nov 18 12:00:00"))
+    assert rows[1].timestamp is None
+
+
+def test_window_recalculation_uses_cached_index_for_all_attacks(tmp_path, monkeypatch):
+    first = tmp_path / "target" / "syslog"
+    second = tmp_path / "target" / "auth.log"
+    first.parent.mkdir(parents=True)
+    first.write_text("Nov 18 12:00:05 target now\n")
+    second.write_text("Nov 18 12:00:40 target later\n")
+    browser = ManualBrowser([make_attack("a"), make_attack("b")], [first, second], [], [],
+                            tmp_path, make_resolver(), 2026, 0, 30, tmp_path / "output")
+    browser.activate_attack()
+    assert browser.visible_files == [first]
+    browser.handle_key(ord("+"))
+    browser._load_lines()
+    assert browser.visible_files == [first, second]
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.active_attack_index == 0
+    browser.handle_key(10)
+    assert browser.active_attack_index == 1
+    assert browser.visible_files == [first, second]
+
+
+def test_cli_manual_window_defaults_do_not_change_automatic_correlation(tmp_path, monkeypatch):
+    from attacklog_correlator import cli
+
+    observed = {}
+
+    class Browser:
+        def __init__(self, *args):
+            observed["manual"] = args[7:9]
+
+        def run(self):
+            return tmp_path / "manual.txt"
+
+    monkeypatch.setattr(manual, "ManualBrowser", Browser)
+    monkeypatch.setattr(cli, "load_all_attacks", lambda *_a, **_kw: [])
+    def load_events(*_args, **kwargs):
+        observed["automatic"] = kwargs["window_before"], kwargs["window_after"]
+        return []
+    monkeypatch.setattr(cli, "load_all_events", load_events)
+    monkeypatch.setattr(cli, "correlate", lambda *_a, **_kw: [])
+    monkeypatch.setattr(cli, "export_outputs", lambda *_a, **_kw: None)
+
+    for flags, manual_window, automatic_window in [
+        ([], (0.0, 30.0), (60.0, 240.0)),
+        (["--window-before", "5", "--window-after", "50"], (5.0, 50.0), (5.0, 50.0)),
+    ]:
+        monkeypatch.setattr("sys.argv", ["correlator", "--root", str(tmp_path), "--manual"] + flags)
+        assert cli.main() == 0
+        assert observed == {"manual": manual_window, "automatic": automatic_window}
