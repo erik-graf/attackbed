@@ -20,9 +20,42 @@ Review previously computed output without reparsing or rescoring:
 uv run attacklog-correlator --root /path/to/workdir --view-existing
 ```
 
+## Manual evidence review
+
+Run the separate curses browser after automatic correlation:
+
+```bash
+uv run attacklog-correlator --root /path/to/workdir --manual
+# Restrict discovery and parsing to the configured log types:
+uv run attacklog-correlator --root /path/to/workdir --manual --strict
+```
+
+The full-width header shows the current AttackMate step. The left pane lists host
+logfiles; the right pane shows that file's log lines within the current attack
+time window (including untimestamped continuation lines after an in-window line).
+The browser reads the selected file on demand using the same timestamp and
+per-host timezone rules as the correlator. The initial window comes from
+`--window-before` and `--window-after`.
+
+Automatic matches are shown in cyan with an `A` marker and are **selected by
+default**. `*` means the line will be exported. Space toggles selection for
+both automatic and manually chosen lines. Selections are tracked per attack step.
+
+Keys: `Tab` or left/right arrow switches panes; up/down (or `j/k`) navigates;
+`[` / `]` (or `p/n`) changes attack; `+` / `-` expands or contracts the
+window by 30 seconds on each side; `h/l` scrolls long lines horizontally;
+`s` saves and `q` saves and exits.
+
+The browser writes **one new text file per session** at
+`output/manual_selection_<timestamp>.txt`. It contains the selected raw lines,
+grouped under AttackMate step and source-logfile headings. Previous selection
+files are not overwritten. Automatic JSON/CSV correlation exports remain
+unchanged. `--manual` cannot be used with `--view-existing` or `--no-ui`.
+
 ## Important options
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
+- `--manual`: open the separate manual evidence-review browser after automatic correlation.
 - `--strict`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
 - `--log-config`: JSON filename-pattern configuration for strict mode (default: the bundled `logtypes.json`). This flag requires `--strict`.
 - `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.

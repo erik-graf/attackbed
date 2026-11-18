@@ -25,7 +25,7 @@ from attacklog_correlator.config import (
 )
 from attacklog_correlator.correlation import correlate
 from attacklog_correlator.events import load_all_events
-from attacklog_correlator.ingestion.discovery import discover_attack_files
+from attacklog_correlator.ingestion.discovery import discover_attack_files, discover_log_files
 from attacklog_correlator.ingestion.logtypes import load_log_types
 from attacklog_correlator.models import RunStats
 from attacklog_correlator.output import append_run_history, export_outputs, load_existing_outputs
@@ -70,6 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--history", nargs="?", const="run-history.jsonl", metavar="FILE",
         help="Append version, settings and summary.json to FILE (default: <root>/run-history.jsonl)",
     )
+    p.add_argument("--manual", action="store_true", help="Review and select log lines in a separate curses browser")
     p.add_argument("--no-ui", action="store_true", help="Write outputs only")
     return p.parse_args()
 
@@ -97,6 +98,10 @@ def main() -> int:
     args = parse_args()
     if args.max_time_delta < 0 or args.window_before < 0 or args.window_after < 0 or args.max_per_attack <= 0:
         print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
+        return 2
+
+    if args.manual and (args.view_existing or args.no_ui):
+        print("[error] --manual cannot be combined with --view-existing or --no-ui", file=sys.stderr)
         return 2
 
     if args.log_config and not args.strict:
@@ -203,6 +208,7 @@ def main() -> int:
         "journalctl_converted_files": stats.journalctl_converted_files,
         "binary_log_files_skipped": stats.binary_log_files_skipped,
         "untimestamped_lines_loaded": args.process_untimestamped_lines,
+        "manual": args.manual,
         "strict": args.strict,
         "log_config": str(Path(args.log_config).expanduser().resolve()) if args.log_config else None,
         "attack_root": str(attack_root),
@@ -213,7 +219,20 @@ def main() -> int:
     }
     print(json.dumps(summary, indent=2))
 
-    if not args.no_ui:
+    if args.manual:
+        try:
+            from .manual import ManualBrowser
+            browser = ManualBrowser(
+                attacks, discover_log_files(log_root, attack_root, log_types),
+                correlations, events, log_root, resolver, args.default_year,
+                args.window_before, args.window_after, out_dir, log_types,
+            )
+            print(f"[manual] selections written to {browser.run()}")
+        except Exception:
+            print("[error] manual review UI failed", file=sys.stderr)
+            traceback.print_exc()
+            return 1
+    elif not args.no_ui:
         try:
             from .tui import CorrelationBrowser
             CorrelationBrowser(attacks, correlations).run()
