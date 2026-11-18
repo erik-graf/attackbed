@@ -23,6 +23,8 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 ## Important options
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
+- `--strict-log-types`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
+- `--log-types-file`: JSON filename-pattern configuration for strict mode (default: the bundled `src/attacklog_correlator/log_types.json`). This flag requires `--strict-log-types`.
 - `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.
 - `--default-timezone`: timezone for naive host-log timestamps.
 - `--window-before` / `--window-after`: broad correlation time window around each attack.
@@ -30,6 +32,36 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 - `--process-untimestamped-lines`: opt in to loading lines that have no parseable timestamp. By default, those lines are counted but skipped for performance.
 - `--view-existing`: open `correlations.json` from the working directory's `output` subdirectory without recomputing.
 - `--history [FILE]`: append one indented JSON record per computation, separated by a blank line, including package version, Git revision (when available), source checksum, scoring settings and a copy of `summary.json`. With no FILE argument, writes to `<root>/run-history.jsonl`; relative FILE paths are resolved under `--root`. The file must end in `.jsonl` to avoid corrupting ordinary JSON or CSV exports. No entry is appended in `--view-existing` mode.
+
+## Log-type configuration
+
+Without `--strict-log-types`, the correlator keeps its previous recursive file discovery and per-line timestamp parsing behavior. It does not consult the log-type configuration.
+
+For a predictable selection of host logs, enable strict mode:
+
+```bash
+uv run attacklog-correlator --root /path/to/workdir --strict-log-types --no-ui
+uv run attacklog-correlator --root /path/to/workdir --strict-log-types --log-types-file my-log-types.json --no-ui
+```
+
+Strict mode recursively searches `hostlogs` but reads **only files** whose **filename** matches a configured pattern. The same rule matches files under every host, e.g. both `hostlogs/web/syslog` and `hostlogs/router/syslog.1`. Rules are evaluated in order; the first matching rule determines how to parse that file. A nonmatching file is ignored, and a line the assigned parser cannot read remains untimestamped—other parsers are **not** tried. `--process-untimestamped-lines` continues to control whether those lines are scored without timing evidence.
+
+Copy the bundled `src/attacklog_correlator/log_types.json` if you want to customize it. For example:
+
+```json
+{
+  "log_types": [
+    {"name": "syslog", "patterns": ["syslog", "syslog.*", "auth.log"], "parser": "syslog"},
+    {"name": "auditd", "patterns": ["audit.log", "audit.log.*"], "parser": "audit"},
+    {"name": "suricata-eve", "patterns": ["eve.json"], "parser": "json", "timestamp_key": "timestamp"},
+    {"name": "custom", "patterns": ["service-*.txt"], "parser": "regex",
+     "timestamp_regex": "time=(\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2})",
+     "datetime_format": "%Y/%m/%d %H:%M:%S"}
+  ]
+}
+```
+
+`patterns` uses case-sensitive filename globs (`*`, `?`, `[0-9]`) rather than absolute paths. Available parsers are `syslog`, `audit`, `access`, `suricata`, `iso`, `json`, and `regex`. JSON rules require a `timestamp_key`; regex rules require a capture group in `timestamp_regex` and an explicit Python `strptime` `datetime_format`. For JSON timestamps with a non-ISO textual format, `datetime_format` can also be specified. Naive timestamps continue through the correlator's existing per-host timezone and clock-skew normalization. Compressed logs (`.gz`, `.xz`, `.bz2`, `.zst`) are skipped in strict mode because the reader does not decompress them. The bundled rules cover common log types, but are intentionally not universal; adapt them to your datasets.
 
 ## Host and attacker timezone config
 
@@ -102,8 +134,8 @@ uv run --extra dev pytest
 
 ## Code structure
 
-The CLI and output formats are unchanged. Implementation helpers now live in
-modules instead of being imported from `cli.py`:
+The existing CLI options remain available, with strict log-type selection added
+as an opt-in. Implementation helpers live in modules instead of `cli.py`:
 
 ```text
 attacklog_correlator/
@@ -116,6 +148,7 @@ attacklog_correlator/
     discovery.py         existing file-discovery rules
     timestamps.py        existing timestamp parsers
     readers.py           streaming text/journal LogRecords
+    logtypes.py          filename-pattern configuration and strict timestamp parsing
   events.py              host enrichment and early candidate filtering
   correlation.py         scoring, relevance and deterministic ranking
   output.py              serialization, saved-output loading and history
@@ -127,7 +160,8 @@ source lines with file/line provenance and an optional `ParsedTimestamp`.
 Naive timestamps keep their wall-clock value and `naive` flag until `events.py`
 applies the host timezone and clock skew. This happens **before** time-window
 pruning; expensive token/host-candidate extraction still happens **after** pruning.
-Discovery and timestamp recognition have not been broadened in this refactor.
+Discovery and timestamp recognition retain their original behavior by default;
+strict mode adds configurable file selection and assigned timestamp parsing.
 
 ```python
 from contextlib import closing

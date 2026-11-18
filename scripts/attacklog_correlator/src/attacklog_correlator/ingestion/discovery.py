@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from attacklog_correlator.ingestion.logtypes import LogTypeRule, matching_log_type
+
 
 ATTACK_LOG_SUFFIXES = {".json"}
 
@@ -26,13 +28,13 @@ def looks_like_log_file(path: Path) -> bool:
     keywords = ("syslog", "messages", "audit", "suricata", "eve", "journal", "docker", "container")
     return any(k in name for k in keywords)
 
-def discover_log_files(root: Path, attack_root: Optional[Path]) -> list[Path]:
+def discover_log_files(root: Path, attack_root: Optional[Path], log_types: Optional[list[LogTypeRule]] = None) -> list[Path]:
     found: list[Path] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
         if attack_root and attack_root.resolve() in path.resolve().parents:
             continue
-        if looks_like_log_file(path):
+        if (matching_log_type(path, log_types) is not None if log_types is not None else looks_like_log_file(path)):
             found.append(path)
     return sorted(found)

@@ -12,6 +12,7 @@ from typing import Any
 from typing import Optional
 
 from attacklog_correlator.ingestion.discovery import discover_log_files
+from attacklog_correlator.ingestion.logtypes import LogTypeRule
 from attacklog_correlator.tokens import safe_ip_address, safe_ip_network, sanitize_host_name
 
 
@@ -291,9 +292,10 @@ def write_generated_config(path: Path, config: ConfigBundle) -> None:
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-def discover_hosts_from_logs(log_root: Path, attack_root: Optional[Path], default_timezone: str) -> dict[str, HostProfile]:
+def discover_hosts_from_logs(log_root: Path, attack_root: Optional[Path], default_timezone: str,
+                             log_types: Optional[list[LogTypeRule]] = None) -> dict[str, HostProfile]:
     hosts: dict[str, HostProfile] = {}
-    for path in discover_log_files(log_root, attack_root):
+    for path in discover_log_files(log_root, attack_root, log_types):
         candidates = host_candidates_from_path(path, log_root)
         if not candidates:
             continue

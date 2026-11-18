@@ -1,0 +1,68 @@
+{
+  "log_types": [
+    {
+      "name": "syslog",
+      "patterns": [
+        "syslog",
+        "syslog.*",
+        "auth.log",
+        "auth.log.*",
+        "kern.log",
+        "kern.log.*",
+        "messages",
+        "messages.*"
+      ],
+      "parser": "syslog"
+    },
+    {
+      "name": "auditd",
+      "patterns": [
+        "audit.log",
+        "audit.log.*"
+      ],
+      "parser": "audit"
+    },
+    {
+      "name": "http-access",
+      "patterns": [
+        "access.log",
+        "access.log.*",
+        "access_log",
+        "access_log.*"
+      ],
+      "parser": "access"
+    },
+    {
+      "name": "suricata",
+      "patterns": [
+        "suricata.log",
+        "suricata.log.*"
+      ],
+      "parser": "suricata"
+    },
+    {
+      "name": "suricata-eve",
+      "patterns": [
+        "eve.json",
+        "eve.json.*"
+      ],
+      "parser": "json",
+      "timestamp_key": "timestamp"
+    },
+    {
+      "name": "docker-json",
+      "patterns": [
+        "*-json.log"
+      ],
+      "parser": "json",
+      "timestamp_key": "time"
+    },
+    {
+      "name": "systemd-journal",
+      "patterns": [
+        "*.journal"
+      ],
+      "parser": "iso"
+    }
+  ]
+}

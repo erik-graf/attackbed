@@ -13,6 +13,7 @@ from typing import Optional
 from .ingestion import readers
 from attacklog_correlator.config import HostResolver, MAX_TIME_DELTA_SECONDS
 from attacklog_correlator.ingestion.discovery import discover_log_files
+from attacklog_correlator.ingestion.logtypes import LogTypeRule, matching_log_type
 from attacklog_correlator.ingestion.timestamps import get_zone
 from attacklog_correlator.models import (
     Attack,
@@ -52,7 +53,7 @@ def load_log_file(
     path: Path, root: Path, default_year: int, resolver: HostResolver,
     include_untimestamped: bool = False, *, attack_times: Optional[list[dt.datetime]] = None,
     window_before: float = 0.0, window_after: float = 0.0,
-    stats: Optional[RunStats] = None,
+    stats: Optional[RunStats] = None, log_type: Optional[LogTypeRule] = None,
 ) -> list[LogEvent]:
     if stats is None:
         stats = RunStats()
@@ -63,7 +64,7 @@ def load_log_file(
     journal = readers.should_try_journalctl(path)
     previous_count = stats.parsed_events
     try:
-        with closing(readers.iter_log_records(path, default_year, stats=stats)) as records:
+        with closing(readers.iter_log_records(path, default_year, stats=stats, log_type=log_type)) as records:
             for record in records:
                 parsed = record.parsed_timestamp
                 timestamp_missing = parsed is None
@@ -110,19 +111,21 @@ def load_all_events(
     include_untimestamped: bool = False, *, attacks: Optional[list[Attack]] = None,
     window_before: float = 60.0, window_after: float = 240.0,
     stats: Optional[RunStats] = None, max_time_delta: float = MAX_TIME_DELTA_SECONDS,
+    log_types: Optional[list[LogTypeRule]] = None,
 ) -> list[LogEvent]:
     events: list[LogEvent] = []
     if stats is None:
         stats = RunStats()
     attack_times = sorted(a.timestamp for a in attacks) if attacks is not None else None
-    for path in discover_log_files(log_root, attack_root):
+    for path in discover_log_files(log_root, attack_root, log_types):
+        log_type = matching_log_type(path, log_types) if log_types is not None else None
         try:
             events.extend(load_log_file(
                 path, log_root, default_year, resolver, include_untimestamped,
                 attack_times=attack_times,
                 window_before=min(window_before, max_time_delta),
                 window_after=min(window_after, max_time_delta),
-                stats=stats,
+                stats=stats, log_type=log_type,
             ))
         except Exception:
             print(f"[warn] failed to read log file: {path}", file=sys.stderr)

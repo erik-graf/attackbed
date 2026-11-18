@@ -26,6 +26,7 @@ from attacklog_correlator.config import (
 from attacklog_correlator.correlation import correlate
 from attacklog_correlator.events import load_all_events
 from attacklog_correlator.ingestion.discovery import discover_attack_files
+from attacklog_correlator.ingestion.logtypes import load_log_types
 from attacklog_correlator.models import RunStats
 from attacklog_correlator.output import append_run_history, export_outputs, load_existing_outputs
 
@@ -43,6 +44,9 @@ def parse_args() -> argparse.Namespace:
         help="Load out-dir/correlations.json and open the browser without recomputing correlations",
     )
     p.add_argument("--host-config", help="Optional JSON config for host timezones, skew, aliases, and IPs")
+    p.add_argument("--strict-log-types", action="store_true",
+                   help="Only read filenames matched by log-type rules; no automatic timestamp parser fallback")
+    p.add_argument("--log-types-file", help="JSON filename rules for --strict-log-types (default: bundled log_types.json)")
     p.add_argument("--default-timezone", default="Europe/Vienna", help="Default timezone for naive host logs")
     p.add_argument("--window-before", type=float, default=60.0, help="Seconds before attack to include")
     p.add_argument("--window-after", type=float, default=240.0, help="Seconds after attack to include")
@@ -95,6 +99,9 @@ def main() -> int:
         print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
         return 2
 
+    if args.log_types_file and not args.strict_log_types:
+        print("[error] --log-types-file requires --strict-log-types", file=sys.stderr)
+        return 2
     attack_root, log_root, out_dir = ensure_work_dirs(Path(args.root))
     host_config_path = Path(args.host_config).expanduser().resolve() if args.host_config else None
     history_path = Path(args.history).expanduser() if args.history is not None else None
@@ -129,9 +136,17 @@ def main() -> int:
                 traceback.print_exc()
         return 0
 
+    log_types = None
+    if args.strict_log_types:
+        try:
+            log_types = load_log_types(Path(args.log_types_file).expanduser() if args.log_types_file else None)
+        except (OSError, ValueError) as exc:
+            print(f"[error] failed to load log-type rules: {exc}", file=sys.stderr)
+            return 2
+
     # First infer host/attacker names from file layout.  The optional config
     # loaded next can correct or enrich these guesses.
-    discovered_hosts = discover_hosts_from_logs(log_root, attack_root, args.default_timezone)
+    discovered_hosts = discover_hosts_from_logs(log_root, attack_root, args.default_timezone, log_types)
     discovered_attacker_hosts = sorted({guess_attacker_host_from_path(p, attack_root) for p in discover_attack_files(attack_root)})
     config = load_config(host_config_path, discovered_hosts, args.default_timezone)
 
@@ -165,7 +180,7 @@ def main() -> int:
         log_root, attack_root, args.default_year, resolver,
         include_untimestamped=args.process_untimestamped_lines,
         attacks=attacks, window_before=args.window_before, window_after=args.window_after, stats=stats,
-        max_time_delta=args.max_time_delta,
+        max_time_delta=args.max_time_delta, log_types=log_types,
     )
     correlations = correlate(attacks, events, args.window_before, args.window_after, args.max_per_attack,
                              max_time_delta=args.max_time_delta)
@@ -188,6 +203,8 @@ def main() -> int:
         "journalctl_converted_files": stats.journalctl_converted_files,
         "binary_log_files_skipped": stats.binary_log_files_skipped,
         "untimestamped_lines_loaded": args.process_untimestamped_lines,
+        "strict_log_types": args.strict_log_types,
+        "log_types_file": str(Path(args.log_types_file).expanduser().resolve()) if args.log_types_file else None,
         "attack_root": str(attack_root),
         "log_root": str(log_root),
         "out_dir": str(out_dir),

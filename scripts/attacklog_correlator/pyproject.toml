@@ -47,6 +47,9 @@ where = ["src"]
 [tool.setuptools.dynamic]
 version = {attr = "attacklog_correlator.metadata.__version__"}
 
+[tool.setuptools.package-data]
+attacklog_correlator = ["log_types.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator
 from typing import Optional
 
+from attacklog_correlator.ingestion.logtypes import LogTypeRule
 from attacklog_correlator.ingestion.timestamps import try_parse_line_timestamp
 from attacklog_correlator.models import LogRecord, RunStats
 
@@ -102,7 +103,8 @@ def preview_message_from_line(line: str) -> str:
             pass
     return text[:400]
 
-def iter_log_records(path: Path, default_year: int, *, stats: Optional[RunStats] = None) -> Iterator[LogRecord]:
+def iter_log_records(path: Path, default_year: int, *, stats: Optional[RunStats] = None,
+                     log_type: Optional[LogTypeRule] = None) -> Iterator[LogRecord]:
     """Stream raw records without host resolution, time filtering or scoring.
 
     Read/parse errors propagate to the caller. Close this iterator when stopping
@@ -118,7 +120,7 @@ def iter_log_records(path: Path, default_year: int, *, stats: Optional[RunStats]
     source = closing(run_journalctl_export(path)) if journal else path.open("r", encoding="utf-8", errors="replace")
     with source as lines:
         for line_number, line in enumerate(lines, start=1):
-            parsed = try_parse_line_timestamp(line, default_year)
+            parsed = log_type.parse_timestamp(line, default_year) if log_type else try_parse_line_timestamp(line, default_year)
             if parsed is None:
                 stats.unparsable_lines += 1
             yield LogRecord(str(path), line_number, line, parsed, "journalctl-export" if journal else None)
