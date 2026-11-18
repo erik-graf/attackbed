@@ -30,21 +30,29 @@ uv run attacklog-correlator --root /path/to/workdir --manual
 uv run attacklog-correlator --root /path/to/workdir --manual --strict
 ```
 
-The full-width header shows the current AttackMate step. The left pane lists host
-logfiles; the right pane shows that file's log lines within the current attack
-time window (including untimestamped continuation lines after an in-window line).
-The browser reads the selected file on demand using the same timestamp and
-per-host timezone rules as the correlator. The initial window comes from
-`--window-before` and `--window-after`.
+The full-width header shows the current AttackMate time, command and metadata
+description (without raw JSON). The left pane lists only logfiles containing
+timestamped lines in the current attack window; the right pane shows those lines
+and any untimestamped continuation lines. The selected logfile stays selected
+when you change attacks, provided it has lines in the new window.
+The browser uses the same timestamp and per-host timezone rules as the correlator.
+The initial window comes from `--window-before` and `--window-after`.
 
 Automatic matches are shown in cyan with an `A` marker and are **selected by
 default**. `*` means the line will be exported. Space toggles selection for
 both automatic and manually chosen lines. Selections are tracked per attack step.
 
+The timestamp heatmap is enabled by default: the timestamp closest to the
+attack time is **red**, the farthest timestamp in the currently displayed
+file/window is **blue**, and intermediate timestamps receive gradually cooler
+shades. Only the timestamp is shaded; automatic matches retain their distinct
+cyan highlighting. Toggle the heatmap with `c`.
+
 Keys: `Tab` or left/right arrow switches panes; up/down (or `j/k`) navigates;
-`[` / `]` (or `p/n`) changes attack; `+` / `-` expands or contracts the
-window by 30 seconds on each side; `h/l` scrolls long lines horizontally;
-`s` saves and `q` saves and exits.
+`[` / `]` (or `p/n`) changes attack; `+` / `-` expands or contracts each
+side of the time window by **10 seconds**; `t` opens a popup to set a symmetric
+`+/- seconds` window around the current attack time; `h/l` scrolls long
+lines horizontally; `s` saves and `q` saves and exits.
 
 The browser writes **one new text file per session** at
 `output/manual_selection_<timestamp>.txt`. It contains the selected raw lines,
