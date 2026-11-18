@@ -31,42 +31,49 @@ uv run attacklog-correlator --root /path/to/workdir --manual --strict
 ```
 
 The manual interface has three vertical panes: **AttackMate steps** on the left,
-**logfiles** in the middle, and **log lines** on the right. The right pane also
-shows the activated attack's time, command and metadata description (no raw JSON).
+**logfiles** in the middle, and **log lines** on the right. The attack pane is
+slightly wider and displays commands without timestamps. The right pane shows
+the selected attack's time, command and metadata description (no raw JSON).
 
-Move through attack steps with the arrow keys, Home/End, or `[` / `]`. **Press
-Enter to activate the highlighted attack**; moving the highlight alone does not
-scan or load logfiles. On the first activation, the browser indexes timestamps
-from every discovered logfile once and calculates the matching file lists for
-**all attacks**. This initial indexing pass can take time for large datasets.
-Subsequent attack switches use the index, and changing a time window recalculates
-matching ranges without re-indexing all logfiles. The right pane rereads only
-the selected logfile's raw lines on demand (including untimestamped continuation
-lines). The selected logfile stays selected when it has entries for the new attack.
+The browser indexes timestamps from discovered logfiles **once at startup** and
+calculates the matching file lists for **all attacks**. This initial indexing
+pass can take time on large datasets. Arrow keys, Home/End and `[` / `]`
+switch attacks immediately, using the index; no Enter confirmation is needed.
+Changing the time window recalculates matches from the index without rescanning
+all logfiles. The right pane still rereads the selected logfile's raw lines on
+demand (including untimestamped continuation lines). The selected logfile is
+preserved when it has entries for the new attack.
 
 Manual review defaults to **0 seconds before and 30 seconds after** the selected
 attack. The automatic correlator still runs once before the UI with its own
 unchanged defaults (60s before, 240s after, and a strict 5s scoring limit).
 `--window-before` and `--window-after` can override both modes' defaults.
 
-Automatic matches are shown in cyan with an `A` marker and are **selected by
-default**. `*` means the line will be exported. Space toggles selection for
-both automatic and manually chosen lines. Selections are tracked per attack step;
-automatic selections outside the visible time window remain in the export unless
-you expand the window and deselect them.
+Attacks with automatic correlations are highlighted in cyan and marked `A`.
+Logfiles are highlighted in cyan when they have automatic correlations for
+the selected attack; each filename is prefixed with `(N)`, the number of
+**distinct automatically correlated lines** (or `(0)` when there are none).
+These counts are unaffected by manual selections and may include matches outside
+the visible manual-review time window.
+
+Automatic log-line matches are also cyan with an `A` marker and are **selected
+by default**. `*` means the line will be exported. Space toggles selection
+for both automatic and manually chosen lines. Selections are tracked per attack
+step; automatically selected lines outside the visible time window remain in
+the export unless you expand the window and deselect them.
 
 The timestamp heatmap is enabled by default: the timestamp closest to the
 attack time is **red**, the farthest timestamp in the displayed file/window is
 **blue**, and intermediate timestamps receive cooler shades. Only the timestamp
 is shaded. Toggle the heatmap with `c`.
 
-Keys: `Tab` or left/right arrows switches between three panes; up/down (or
-`j/k`) navigates; **Home/End (Pos1/End)** jumps to the first/last entry;
-`[` / `]` (or `p/n`) highlights the previous/next attack; `Enter` activates
-it. `+` / `-` adjusts the **post-attack** window by 10 seconds, leaving
-the pre-attack window unchanged; `t` lets you enter separate *before* and
-*after* offsets in seconds. `h/l` scrolls long lines horizontally; `s`
-saves and `q` saves and exits.
+Keys: `Space` marks/unmarks a log line; `s` saves marked lines to a file;
+`Tab` or left/right arrows switches between panes; up/down (or `j/k`)
+navigates; Home/End (Pos1/End) jumps to the first/last entry; `[` / `]`
+(or `p/n`) selects the previous/next attack. `+` / `-` adjusts the
+**post-attack** window by 10 seconds; `t` sets separate *before* and
+*after* offsets; `c` toggles the heatmap, `h/l` scrolls horizontally,
+and `q` saves and exits. The bottom hints now use explicit, pipe-separated labels.
 
 The browser writes **one new text file per session** at
 `output/manual_selection_<timestamp>.txt`. It contains the selected raw lines,

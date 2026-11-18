@@ -7,7 +7,7 @@ import datetime as dt
 import math
 import re
 from bisect import bisect_left, bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,7 +162,7 @@ class ManualBrowser:
         self.line_top = 0
         self.horizontal = 0
         self.focus = "attacks"
-        self.status = "Select an attack and press Enter to load logs"
+        self.status = "Indexing log timestamps at startup"
         self.auto_attr = curses.A_BOLD
         self.heatmap = True
         self.heat_attrs: list[int] = []
@@ -172,6 +172,8 @@ class ManualBrowser:
 
         # A source line can correlate with several attack steps. Keep those selections independent.
         self.automatic = {(c.attack_id, c.event_file, c.event_line) for c in correlations}
+        self.auto_counts = Counter((attack_id, path) for attack_id, path, _ in self.automatic)
+        self.auto_attacks = {attack_id for attack_id, _path, _line in self.automatic}
         self.selected = set(self.automatic)
         source_text = {(e.file_path, e.line_number): e.raw_line for e in events}
         self.text_by_key = {
@@ -287,6 +289,8 @@ class ManualBrowser:
         if not self.attacks:
             return
         self._index_files(screen)
+        if self.active_attack_index == self.attack_index:
+            return
         if self.active_attack_index is not None and self.lines:
             self._preferred_line = self.lines[self.line_index].line_number
         self.active_attack_index = self.attack_index
@@ -398,6 +402,7 @@ class ManualBrowser:
             delta = 1 if key in (ord("n"), ord("]")) else -1
             self.attack_index = (self.attack_index + delta) % len(self.attacks)
             self.focus = "attacks"
+            self.activate_attack()
         elif key in (ord("+"), ord("=")):
             self.change_window(10)
         elif key in (ord("-"), ord("_")):
@@ -430,7 +435,9 @@ class ManualBrowser:
                          else -1 if key in (curses.KEY_UP, ord("k")) else 1)
                 selected = max(0, min(total - 1, selected + delta))
             if self.focus == "attacks":
-                self.attack_index = selected
+                if selected != self.attack_index:
+                    self.attack_index = selected
+                    self.activate_attack()
             elif self.focus == "files":
                 self.file_index = selected
                 self._view_key = None
@@ -464,10 +471,10 @@ class ManualBrowser:
             return
         if self.active_attack_index is not None:
             self._load_lines()
-        attack_width = min(26, max(19, width // 5))
+        attack_width = min(31, max(24, width // 5 + 5))
         file_width = min(38, max(22, width // 4))
         log_width = width - attack_width - file_width
-        body_height = height - 1
+        body_height = height - 3
         attacks_win = screen.derwin(body_height, attack_width, 0, 0)
         files_win = screen.derwin(body_height, file_width, 0, attack_width)
         logs_win = screen.derwin(body_height, log_width, 0, attack_width + file_width)
@@ -482,17 +489,24 @@ class ManualBrowser:
         for i in range(self.attack_top, min(len(self.attacks), self.attack_top + attack_rows)):
             attack = self.attacks[i]
             active = ">" if i == self.active_attack_index else " "
-            text = f"{active}{i + 1:>3} {attack.timestamp:%H:%M:%S} {attack.cmd}"
-            attr = curses.A_REVERSE if self.focus == "attacks" and i == self.attack_index else 0
+            matched = attack.attack_id in self.auto_attacks
+            text = f"{active}{i + 1:>3} {'A ' if matched else '  '}{attack.cmd}"
+            attr = self.auto_attr if matched else 0
+            if self.focus == "attacks" and i == self.attack_index:
+                attr |= curses.A_REVERSE
             self._write(attacks_win, i - self.attack_top + 1, 1, text, attack_width - 2, attr)
 
         self.file_top = self._scroll(self.file_index, self.file_top, attack_rows)
         for i in range(self.file_top, min(len(self.visible_files), self.file_top + attack_rows)):
-            name = self.visible_files[i].relative_to(self.log_root).as_posix()
-            attr = curses.A_REVERSE if self.focus == "files" and i == self.file_index else 0
+            path = self.visible_files[i]
+            count = self.auto_counts[(self.attacks[self.active_attack_index].attack_id, str(path))]
+            name = f"({count}) {path.relative_to(self.log_root).as_posix()}"
+            attr = self.auto_attr if count else 0
+            if self.focus == "files" and i == self.file_index:
+                attr |= curses.A_REVERSE
             self._write(files_win, i - self.file_top + 1, 1, name, file_width - 2, attr)
         if self.active_attack_index is None:
-            self._write(logs_win, 1, 1, "Select an attack and press Enter", log_width - 2)
+            self._write(logs_win, 1, 1, "Loading attack logs...", log_width - 2)
         else:
             attack = self.attacks[self.active_attack_index]
             cmd, description = attack_details(attack)
@@ -533,9 +547,14 @@ class ManualBrowser:
             if not self.visible_files:
                 self._write(logs_win, 5, 1, "No timestamped logfiles in this window", log_width - 2)
 
-        footer = (self.status or f"{len(self.selected)} selected")
-        help_text = " Tab panes Enter load Home/End +/-10s t window c colors Space toggle s save q quit"
-        self._write(screen, height - 1, 0, footer + " |" + help_text, width - 1, curses.A_REVERSE)
+        footer = f"{len(self.selected)} marked | {self.status or 'A/cyan: correlator match'}"
+        self._write(screen, height - 3, 0, footer, width - 1, curses.A_REVERSE)
+        self._write(screen, height - 2, 0,
+                    "space: mark line | s: save marked lines to file | q: save & quit",
+                    width - 1, curses.A_REVERSE)
+        self._write(screen, height - 1, 0,
+                    "tab: pane | arrows: move | [ ]: attack | t: range | +/-: 10s | c: map",
+                    width - 1, curses.A_REVERSE)
         screen.refresh()
 
     def _main(self, screen) -> None:
@@ -556,6 +575,7 @@ class ManualBrowser:
                     break
                 curses.init_pair(index, color, -1)
                 self.heat_attrs.append(curses.color_pair(index) | curses.A_BOLD)
+        self.activate_attack(screen)
         while True:
             self._draw(screen)
             if not self.handle_key(screen.getch(), screen):

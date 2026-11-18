@@ -144,9 +144,9 @@ def test_curses_panes_and_autocorrelation_marker(tmp_path):
 
     screen = Window()
     browser._draw(screen)
-    assert screen.panes[0][0] == (23, 20, 0, 0)
-    assert screen.panes[1][0] == (23, 25, 0, 20)
-    assert screen.panes[2][0] == (23, 55, 0, 45)
+    assert screen.panes[0][0] == (21, 25, 0, 0)
+    assert screen.panes[1][0] == (21, 25, 0, 25)
+    assert screen.panes[2][0] == (21, 50, 0, 50)
     assert any("*A" in row[2] and "target event" in row[2]
                for row in screen.panes[2][1].writes)
 
@@ -334,7 +334,7 @@ def test_heatmap_default_red_closest_blue_farthest_and_toggle(tmp_path):
     assert all(x != 11 for _y, x, _text, _attr in screen.panes[2].writes)
 
 
-def test_attack_scroll_does_not_index_until_enter_and_index_runs_once(tmp_path, monkeypatch):
+def test_switch_attack_indexes_only_once_without_enter(tmp_path, monkeypatch):
     path = tmp_path / "target" / "syslog"
     path.parent.mkdir()
     path.write_text("Nov 18 12:00:00 target first\nNov 18 12:00:20 target second\n")
@@ -348,21 +348,17 @@ def test_attack_scroll_does_not_index_until_enter_and_index_runs_once(tmp_path, 
         return real_index(*args, **kwargs)
     monkeypatch.setattr(manual, "index_log_file", counting_index)
     browser.handle_key(manual.curses.KEY_END)
-    assert browser.attack_index == 1
+    assert browser.attack_index == browser.active_attack_index == 1
+    assert calls == [path]
     browser.handle_key(manual.curses.KEY_HOME)
-    assert browser.attack_index == 0
-    assert browser.active_attack_index is None
-    assert calls == []
-    browser.handle_key(10)
-    assert browser.active_attack_index == 0
+    assert browser.attack_index == browser.active_attack_index == 0
     assert calls == [path]
     assert browser.visible_files == [path]
-    browser.handle_key(manual.curses.KEY_END)
-    assert browser.attack_index == 1
+    browser.handle_key(10)  # Enter remains optional and does not re-index
     assert browser.active_attack_index == 0
+    browser.handle_key(manual.curses.KEY_END)
+    assert browser.attack_index == browser.active_attack_index == 1
     assert calls == [path]
-    browser.handle_key(10)
-    assert browser.active_attack_index == 1
     browser.change_window(10)
     browser._load_lines()
     assert calls == [path]
@@ -429,8 +425,6 @@ def test_window_recalculation_uses_cached_index_for_all_attacks(tmp_path, monkey
     browser._load_lines()
     assert browser.visible_files == [first, second]
     browser.handle_key(manual.curses.KEY_END)
-    assert browser.active_attack_index == 0
-    browser.handle_key(10)
     assert browser.active_attack_index == 1
     assert browser.visible_files == [first, second]
 
@@ -463,3 +457,144 @@ def test_cli_manual_window_defaults_do_not_change_automatic_correlation(tmp_path
         monkeypatch.setattr("sys.argv", ["correlator", "--root", str(tmp_path), "--manual"] + flags)
         assert cli.main() == 0
         assert observed == {"manual": manual_window, "automatic": automatic_window}
+
+
+def test_index_is_created_at_ui_startup(tmp_path, monkeypatch):
+    browser, path = make_browser(tmp_path, ["Nov 18 12:00:00 target event"])
+    browser._timestamps = None
+    browser._times = {}
+    browser._window_key = None
+    browser._window_files = []
+    browser.active_attack_index = None
+    calls = []
+    real = manual.index_log_file
+
+    def tracked(*args, **kw):
+        calls.append(args[0])
+        return real(*args, **kw)
+
+    monkeypatch.setattr(manual, "index_log_file", tracked)
+
+    class Screen:
+        def keypad(self, _enabled):
+            pass
+
+        def getmaxyx(self):
+            return (24, 110)
+
+        def erase(self):
+            pass
+
+        def derwin(self, *_args):
+            return self
+
+        def box(self):
+            pass
+
+        def addnstr(self, *_args):
+            pass
+
+        def refresh(self):
+            pass
+
+        def getch(self):
+            assert browser.active_attack_index == 0
+            assert calls == [path]
+            return ord("q")
+
+    monkeypatch.setattr(manual.curses, "curs_set", lambda _n: None)
+    monkeypatch.setattr(manual.curses, "has_colors", lambda: False)
+    browser._main(Screen())
+
+
+def test_attack_and_file_correlations_highlight_and_show_counts(tmp_path):
+    first = tmp_path / "target" / "syslog"
+    second = tmp_path / "target" / "auth.log"
+    first.parent.mkdir(parents=True)
+    first.write_text("Nov 18 12:00:00 target a\nNov 18 12:00:01 target b\n")
+    second.write_text("Nov 18 12:00:00 target no match\n")
+    attacks = [make_attack("with-auto"), make_attack("without-auto")]
+    matches = [SimpleNamespace(attack_id="with-auto", event_file=str(first),
+                               event_line=line, event_message="matching") for line in (1, 2)]
+    matches.append(SimpleNamespace(attack_id="with-auto", event_file=str(first),
+                                   event_line=1, event_message="duplicate"))
+    browser = ManualBrowser(attacks, [first, second], matches, [], tmp_path,
+                            make_resolver(), 2026, 0, 30, tmp_path / "output")
+    browser.activate_attack()
+    browser.auto_attr = 4096
+
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self.panes = []
+
+        def getmaxyx(self):
+            return (24, 110)
+
+        def erase(self):
+            pass
+
+        def refresh(self):
+            pass
+
+        def box(self):
+            pass
+
+        def derwin(self, *_args):
+            w = Window()
+            self.panes.append(w)
+            return w
+
+        def addnstr(self, y, x, text, width, attr=0):
+            self.writes.append((y, x, text[:width], attr))
+
+    screen = Window()
+    browser._draw(screen)
+    attack_rows = screen.panes[0].writes
+    file_rows = screen.panes[1].writes
+    assert any("curl" in text and "12:00:00" not in text and "A" in text and attr & 4096
+               for _y, _x, text, attr in attack_rows)
+    assert any("curl" in text and not attr & 4096 for _y, _x, text, attr in attack_rows)
+    assert any(text.startswith("(2) ") and "syslog" in text and attr & 4096
+               for _y, _x, text, attr in file_rows)
+    assert any(text.startswith("(0) ") and "auth.log" in text and not attr & 4096
+               for _y, _x, text, attr in file_rows)
+    browser.handle_key(manual.curses.KEY_END)
+    screen = Window()
+    browser._draw(screen)
+    assert browser.active_attack_index == 1
+    assert all(not (attr & 4096) for _y, _x, text, attr in screen.panes[0].writes
+               if "curl" in text and text.startswith(">"))
+    assert any(text.startswith("(0) ") for _y, _x, text, _attr in screen.panes[1].writes)
+
+
+def test_footer_uses_descriptive_pipe_separated_labels(tmp_path):
+    browser, _path = make_browser(tmp_path, ["Nov 18 12:00:00 target event"])
+
+    class Screen:
+        def __init__(self):
+            self.lines = {}
+
+        def getmaxyx(self):
+            return (24, 120)
+
+        def erase(self):
+            pass
+
+        def box(self):
+            pass
+
+        def derwin(self, *_args):
+            return Screen()
+
+        def addnstr(self, y, x, txt, width, attr=0):
+            self.lines[y] = txt[:width]
+
+        def refresh(self):
+            pass
+
+    screen = Screen()
+    browser._draw(screen)
+    assert "space: mark line | s: save marked lines to file" in screen.lines[22]
+    assert "tab: pane | arrows: move" in screen.lines[23]
+    assert "Home/End" not in screen.lines[23]
