@@ -73,14 +73,20 @@ outside the time window and files without timestamps.
 Ctrl+Shift+F as Ctrl+F. Use capital **`F`** (Shift+F) for the all-lines
 search reliably; modified Ctrl+Shift+F is also recognized when the terminal
 sends a distinct CSI key sequence. Search results temporarily replace the
-file/log lists with matches; you can mark them with Space. Press Escape to
-return to ordinary time-window browsing, or switch attacks to clear the search.
+file/log lists with matching lines, with each occurrence highlighted (including
+hex-byte matches). Press `n` or `p` to jump to the next or previous matching line,
+wrapping between logfiles. You can mark results with Space. Press Escape to
+return to ordinary time-window browsing, or switch attacks with `[` / `]` to
+clear the search.
 Both searches are literal, with case-insensitive ASCII text matching, and the
 all-lines search scans the source files on demand (up to 2,000 matches).
 
 Search for raw bytes using `\xNN` escapes, for example `\xef`. Byte searches
 are exact, can mix text and hex escapes, and work with non-UTF8 source bytes.
 Invalid UTF-8 bytes are displayed as printable `\xNN` escapes in results.
+
+The selected attack and logfile remain highlighted even while focus is in a
+different pane. The focused pane additionally underlines the selected entry.
 
 The timestamp heatmap is on by default: closest timestamps **red**, farthest
 timestamps **blue**, with colors applied only to timestamp text. Press `c` to
@@ -89,10 +95,11 @@ toggle the heatmap.
 ### Keys
 
 `Space` marks/unmarks a log line; `s` saves marked lines to one text file;
-`a` toggles automatic marks; `Ctrl+F` searches the window; `F` searches all
-log lines; Escape closes the search. Tab/left/right switches panes;
-up/down or `j/k` navigates; Home/End jumps to the first/last entry;
-`[` / `]` or `p/n` moves between attacks; `+/-` adjusts the post-attack window
+`a` toggles automatic marks; `Ctrl+F` searches the current time window;
+`F` searches all log lines; `n/p` jumps to next/previous search matches.
+Escape closes the search. Tab/left/right switches panes; up/down or `j/k`
+navigates; Home/End jumps to the first/last entry. `[` / `]` moves between
+attacks; `+/-` adjusts the post-attack window
 by 10 seconds; `t` sets separate before/after offsets; `h/l` scrolls long lines
 horizontally; `q` saves and exits.
 

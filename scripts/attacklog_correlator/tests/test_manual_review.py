@@ -90,7 +90,7 @@ def test_selections_are_scoped_to_attack_and_save_raw_lines(tmp_path):
     browser, path = make_browser(tmp_path, [text], attacks=[make_attack("a"), make_attack("b")])
     assert len(browser.selected) == 2
     browser.toggle_selected()
-    browser.handle_key(ord("n"))
+    browser.handle_key(ord("]"))
     browser.handle_key(10)
     browser._load_lines()
     assert len(browser.selected) == 1
@@ -261,7 +261,7 @@ def test_next_attack_preserves_selected_file(tmp_path):
     browser.focus = "files"
     browser.handle_key(ord("j"))
     assert browser.visible_files[browser.file_index] == second
-    browser.handle_key(ord("n"))
+    browser.handle_key(ord("]"))
     browser.handle_key(10)
     browser._load_lines()
     assert browser.visible_files[browser.file_index] == second
@@ -633,8 +633,8 @@ def test_footer_uses_descriptive_pipe_separated_labels(tmp_path):
     screen = Screen()
     browser._draw(screen)
     assert "space: mark line | s: save marked lines to file" in screen.lines[22]
-    assert "Ctrl+F: search window" in screen.lines[23]
-    assert "Ctrl+Shift+F/F: search all" in screen.lines[23]
+    assert "Ctrl+F: search current time window" in screen.lines[23]
+    assert "n/p: matches" in screen.lines[23]
     assert "Home/End" not in screen.lines[23]
 
 
@@ -745,3 +745,115 @@ def test_search_popup_and_modified_control_key(tmp_path, monkeypatch):
             return self.values.pop(0) if self.values else -1
         def timeout(self, _ms): pass
     assert browser._read_key(EnhancedKeys()) == manual.SEARCH_ALL_KEY
+
+
+def test_search_match_spans_cover_repeated_text_and_non_utf8_bytes():
+    raw = b"error ERROR error"
+    rendered = raw.decode("utf-8", errors="backslashreplace")
+    spans = manual.search_match_spans(raw, b"error", False)
+    assert [rendered[start:end] for start, end in spans] == ["error", "ERROR", "error"]
+    invalid = b"byte \xef and \xef"
+    shown = invalid.decode("utf-8", errors="backslashreplace")
+    spans = manual.search_match_spans(invalid, b"\xef", True)
+    assert [shown[start:end] for start, end in spans] == [r"\xef", r"\xef"]
+    utf8 = "wide Ａ glyph".encode("utf-8")
+    spans = manual.search_match_spans(utf8, b"\xef", True)
+    assert [utf8.decode("utf-8")[start:end] for start, end in spans] == ["Ａ"]
+
+
+def test_search_next_previous_wrap_between_logfiles(tmp_path):
+    first = tmp_path / "host" / "syslog"
+    second = tmp_path / "host" / "auth.log"
+    first.parent.mkdir(parents=True)
+    first.write_text("Nov 18 12:00:01 host error first\nNov 18 12:00:02 host ERROR second\n")
+    second.write_text("Nov 18 12:00:03 host error third\n")
+    browser = ManualBrowser([make_attack("first"), make_attack("second")],
+                            [first, second], [], [], tmp_path, make_resolver(),
+                            2026, 0, 30, tmp_path / "output")
+    browser.activate_attack()
+    assert browser.search("error") == 3
+    assert browser.file_index == browser.line_index == 0
+    browser.handle_key(ord("n"))
+    assert (browser.file_index, browser.line_index) == (0, 1)
+    browser.handle_key(ord("n"))
+    assert (browser.file_index, browser.line_index) == (1, 0)
+    browser.handle_key(ord("n"))
+    assert (browser.file_index, browser.line_index) == (0, 0)
+    browser.handle_key(ord("p"))
+    assert (browser.file_index, browser.line_index) == (1, 0)
+    assert browser.attack_index == browser.active_attack_index == 0
+    assert browser.focus == "lines"
+    browser.handle_key(ord("]"))
+    assert browser.attack_index == browser.active_attack_index == 1
+    assert browser.search_results is None
+    browser.handle_key(ord("p"))
+    assert browser.attack_index == 1
+    assert browser.status == "Search with Ctrl+F or F first"
+
+
+def test_selected_attack_and_file_stay_highlighted_outside_their_panes(tmp_path):
+    browser, _ = make_browser(tmp_path, ["Nov 18 12:00:00 target error"])
+    browser.focus = "lines"
+
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self.panes = []
+        def getmaxyx(self):
+            return (24, 100)
+        def erase(self):
+            pass
+        def refresh(self):
+            pass
+        def box(self):
+            pass
+        def derwin(self, *_args):
+            child = Window()
+            self.panes.append(child)
+            return child
+        def addnstr(self, y, x, text, width, attr=0):
+            self.writes.append((y, x, text[:width], attr))
+
+    screen = Window()
+    browser._draw(screen)
+    attack_attrs = [attr for _y, _x, text, attr in screen.panes[0].writes if "curl" in text]
+    file_attrs = [attr for _y, _x, text, attr in screen.panes[1].writes if "syslog" in text]
+    assert len(attack_attrs) == len(file_attrs) == 1
+    assert attack_attrs[0] & manual.curses.A_REVERSE
+    assert file_attrs[0] & manual.curses.A_REVERSE
+
+
+def test_search_highlights_matches_in_log_pane(tmp_path):
+    browser, _ = make_browser(tmp_path, [
+        "Nov 18 12:00:00 target error and ERROR, plus error"
+    ])
+    assert browser.search("error") == 1
+    assert len(browser.lines[0].search_spans) == 3
+    browser.heatmap = False
+    browser.search_attr = manual.curses.A_STANDOUT | manual.curses.A_BOLD
+
+    class Window:
+        def __init__(self):
+            self.writes = []
+            self.panes = []
+        def getmaxyx(self):
+            return (24, 140)
+        def erase(self):
+            pass
+        def refresh(self):
+            pass
+        def box(self):
+            pass
+        def derwin(self, *_args):
+            child = Window()
+            self.panes.append(child)
+            return child
+        def addnstr(self, y, x, text, width, attr=0):
+            self.writes.append((y, x, text[:width], attr))
+
+    screen = Window()
+    browser._draw(screen)
+    right = screen.panes[2]
+    highlights = [text for _y, x, text, attr in right.writes
+                  if x >= 11 and attr == browser.search_attr]
+    assert highlights == ["error", "ERROR", "error"]

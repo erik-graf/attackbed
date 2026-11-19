@@ -30,6 +30,7 @@ class ManualLine:
     text: str
     timestamp: Optional[dt.datetime] = None
     timestamp_span: Optional[tuple[int, int]] = None
+    search_spans: tuple[tuple[int, int], ...] = ()
 
 
 def attack_details(attack: Attack) -> tuple[str, str]:
@@ -146,6 +147,26 @@ def parse_search_query(query: str) -> tuple[bytes, bool]:
     return needle, has_hex
 
 
+def search_match_spans(raw: bytes, needle: bytes, exact_bytes: bool) -> tuple[tuple[int, int], ...]:
+    """Map matching source-byte positions to the rendered text positions."""
+    haystack = raw if exact_bytes else raw.lower()
+    target = needle if exact_bytes else needle.lower()
+    starts, ends = [], []
+    column = 0
+    for char in raw.decode("utf-8", errors="surrogateescape"):
+        byte_count = len(char.encode("utf-8", errors="surrogateescape"))
+        display_width = 4 if "\udc80" <= char <= "\udcff" else 1
+        starts.extend([column] * byte_count)
+        ends.extend([column + display_width] * byte_count)
+        column += display_width
+    spans = []
+    start = 0
+    while (position := haystack.find(target, start)) >= 0:
+        spans.append((starts[position], ends[position + len(needle) - 1]))
+        start = position + len(needle)
+    return tuple(spans)
+
+
 def iter_search_lines(path: Path):
     """Yield source line numbers and raw bytes; preserve non-UTF8 bytes for hex search."""
     if readers.should_try_journalctl(path):
@@ -196,6 +217,7 @@ class ManualBrowser:
         self.focus = "attacks"
         self.status = "Indexing log timestamps at startup"
         self.auto_attr = curses.A_BOLD
+        self.search_attr = curses.A_STANDOUT | curses.A_BOLD
         self.heatmap = True
         self.heat_attrs: list[int] = []
         self._view_key: Optional[tuple] = None
@@ -422,7 +444,8 @@ class ManualBrowser:
                         text = raw.decode("utf-8", errors="backslashreplace")
                         stamp = by_line.get(number)
                         span = timestamp_span(text, stamp.raw_timestamp) if stamp else None
-                        found.append(ManualLine(number, text, stamp.time if stamp else None, span))
+                        found.append(ManualLine(number, text, stamp.time if stamp else None, span,
+                                                search_match_spans(raw, needle, exact_bytes)))
                         total += 1
                         if total >= 2000:
                             break
@@ -451,6 +474,24 @@ class ManualBrowser:
         if total == 2000:
             self.status += " (first 2000)"
         return total
+
+    def jump_match(self, direction: int) -> None:
+        """Move to the next/previous matching line, wrapping between files."""
+        if self.search_results is None:
+            self.status = "Search with Ctrl+F or F first"
+            return
+        self._load_lines()
+        if not self.lines:
+            return
+        new_line = self.line_index + direction
+        if 0 <= new_line < len(self.lines):
+            self.line_index = new_line
+        else:
+            self.file_index = (self.file_index + direction) % len(self.visible_files)
+            self._view_key = None
+            self._load_lines()
+            self.line_index = 0 if direction > 0 else len(self.lines) - 1
+        self.focus = "lines"
 
     def _prompt_search(self, screen, *, all_lines: bool = False) -> None:
         height, width = screen.getmaxyx()
@@ -596,8 +637,10 @@ class ManualBrowser:
                 self.activate_attack(screen)
             elif self.focus == "files":
                 self.focus = "lines"
-        elif key in (ord("n"), ord("]"), ord("p"), ord("[")) and self.attacks:
-            delta = 1 if key in (ord("n"), ord("]")) else -1
+        elif key in (ord("n"), ord("p")):
+            self.jump_match(1 if key == ord("n") else -1)
+        elif key in (ord("]"), ord("[")) and self.attacks:
+            delta = 1 if key == ord("]") else -1
             self.attack_index = (self.attack_index + delta) % len(self.attacks)
             self.focus = "attacks"
             self.activate_attack()
@@ -690,8 +733,10 @@ class ManualBrowser:
             matched = attack.attack_id in self.auto_attacks
             text = f"{active}{i + 1:>3} {'A ' if matched else '  '}{attack.cmd}"
             attr = self.auto_attr if matched else 0
-            if self.focus == "attacks" and i == self.attack_index:
+            if i == self.attack_index:
                 attr |= curses.A_REVERSE
+                if self.focus == "attacks":
+                    attr |= curses.A_UNDERLINE
             self._write(attacks_win, i - self.attack_top + 1, 1, text, attack_width - 2, attr)
 
         self.file_top = self._scroll(self.file_index, self.file_top, attack_rows)
@@ -700,8 +745,10 @@ class ManualBrowser:
             count = self.auto_counts[(self.attacks[self.active_attack_index].attack_id, str(path))]
             name = (f"({count}) " if self.automatic else "") + path.relative_to(self.log_root).as_posix()
             attr = self.auto_attr if count else 0
-            if self.focus == "files" and i == self.file_index:
+            if i == self.file_index:
                 attr |= curses.A_REVERSE
+                if self.focus == "files":
+                    attr |= curses.A_UNDERLINE
             self._write(files_win, i - self.file_top + 1, 1, name, file_width - 2, attr)
         if self.active_attack_index is None:
             self._write(logs_win, 1, 1, "Loading attack logs...", log_width - 2)
@@ -742,6 +789,12 @@ class ManualBrowser:
                             color |= curses.A_REVERSE
                         self._write(logs_win, y, 11 + first - self.horizontal,
                                     line.text[first:last], last - first, color)
+                for begin, end in line.search_spans:
+                    first = max(begin, self.horizontal)
+                    last = min(end, self.horizontal + max(0, available - 10))
+                    if first < last:
+                        self._write(logs_win, y, 11 + first - self.horizontal,
+                                    line.text[first:last], last - first, self.search_attr)
             if not self.visible_files:
                 self._write(logs_win, 5, 1, "No timestamped logfiles in this window", log_width - 2)
 
@@ -751,7 +804,7 @@ class ManualBrowser:
                     "space: mark line | s: save marked lines to file | a: toggle auto | q: quit",
                     width - 1, curses.A_REVERSE)
         self._write(screen, height - 1, 0,
-                    "Ctrl+F: search window | Ctrl+Shift+F/F: search all | Esc: close search | t: range",
+                    "Ctrl+F: search current time window | F/Ctrl+Shift+F: all | n/p: matches",
                     width - 1, curses.A_REVERSE)
         screen.refresh()
 
@@ -800,6 +853,10 @@ class ManualBrowser:
                     break
                 curses.init_pair(index, color, -1)
                 self.heat_attrs.append(curses.color_pair(index) | curses.A_BOLD)
+            search_pair = len(self.heat_attrs) + 2
+            if search_pair < curses.COLOR_PAIRS:
+                curses.init_pair(search_pair, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+                self.search_attr = curses.color_pair(search_pair) | curses.A_BOLD
         self.activate_attack(screen)
         while True:
             self._draw(screen)
