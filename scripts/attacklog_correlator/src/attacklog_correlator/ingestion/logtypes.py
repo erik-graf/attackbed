@@ -15,7 +15,7 @@ from attacklog_correlator.ingestion.timestamps import parse_epoch_seconds
 from attacklog_correlator.models import ParsedTimestamp, UTC
 
 
-SOURCE_LOG_TYPES_FILE = Path(__file__).resolve().parents[2] / "logtypes.json"
+SOURCE_LOG_TYPES_FILE = Path(__file__).resolve().parents[3] / "logtypes.json"
 DEFAULT_LOG_TYPES_FILE = (SOURCE_LOG_TYPES_FILE if SOURCE_LOG_TYPES_FILE.is_file()
                           else Path(sys.prefix) / "share/attacklog-correlator/logtypes.json")
 

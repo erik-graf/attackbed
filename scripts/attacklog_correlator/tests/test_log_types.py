@@ -126,7 +126,7 @@ def test_cli_strict_flag_names(monkeypatch):
     assert cli.parse_args().strict is False
 
 def test_default_logtypes_path_is_at_project_root():
-    assert DEFAULT_LOG_TYPES_FILE.name == "logtypes.json"
+    assert DEFAULT_LOG_TYPES_FILE == Path(__file__).resolve().parents[1] / "logtypes.json"
     assert DEFAULT_LOG_TYPES_FILE.is_file()
 
 

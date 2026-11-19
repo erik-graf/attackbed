@@ -104,8 +104,11 @@ by 10 seconds; `t` sets separate before/after offsets; `h/l` scrolls long lines
 horizontally; `q` saves and exits.
 
 Each session writes `output/manual_selection_<timestamp>.txt`, containing
-the selected raw log lines, grouped by AttackMate step and source logfile.
-Saved automatic correlations are read-only in `--view-existing` mode.
+selected log lines grouped by AttackMate step and source logfile. When a selected
+saved correlation's original source line cannot be read, its stored preview is
+explicitly labeled `SOURCE UNAVAILABLE` in the export rather than presented as
+complete evidence. Saved automatic correlations are read-only in
+`--view-existing` mode.
 
 ## Important options
 
