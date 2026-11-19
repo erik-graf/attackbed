@@ -22,69 +22,89 @@ uv run attacklog-correlator --root /path/to/workdir --view-existing
 
 ## Manual evidence review
 
-Run the separate curses browser after automatic correlation:
+Manual mode **does not run automatic correlation by default**. It reads AttackMate
+steps and opens a browser for marking evidence:
 
 ```bash
 uv run attacklog-correlator --root /path/to/workdir --manual
-# Restrict discovery and parsing to the configured log types:
-uv run attacklog-correlator --root /path/to/workdir --manual --strict
+# Run automatic correlation as well; preload its matches as marked:
+uv run attacklog-correlator --root /path/to/workdir --manual --include-auto
+# Reuse previously saved correlations without running the correlator again:
+uv run attacklog-correlator --root /path/to/workdir --manual --view-existing --include-auto
+# Browse previously saved attack steps without preloading automatic matches:
+uv run attacklog-correlator --root /path/to/workdir --manual --view-existing
 ```
 
-The manual interface has three vertical panes: **AttackMate steps** on the left,
-**logfiles** in the middle, and **log lines** on the right. The attack pane is
-slightly wider and displays commands without timestamps. The right pane shows
-the selected attack's time, command and metadata description (no raw JSON).
+The `--view-existing` options read `output/correlations.json`. The manual browser
+still indexes logfile timestamps **once at startup**; it does not rerun lexical
+scoring when using saved results. Fresh manual-only runs do not overwrite
+automatic correlation exports or append to the automatic run history.
 
-The browser indexes timestamps from discovered logfiles **once at startup** and
-calculates the matching file lists for **all attacks**. This initial indexing
-pass can take time on large datasets. Arrow keys, Home/End and `[` / `]`
-switch attacks immediately, using the index; no Enter confirmation is needed.
-Changing the time window recalculates matches from the index without rescanning
-all logfiles. The right pane still rereads the selected logfile's raw lines on
-demand (including untimestamped continuation lines). The selected logfile is
-preserved when it has entries for the new attack.
+The interface has three vertical panes: **AttackMate steps** on the left,
+**logfiles** in the middle, and **log lines** on the right. The right pane shows
+the selected attack's time, command and metadata description (not raw JSON).
+The attack pane has no timestamps. Navigation between attacks uses the cached
+timestamp index; it immediately changes the selected attack. The selected
+logfile is preserved if it has lines in the new window, and only that logfile
+is reread to display raw lines.
 
-Manual review defaults to **0 seconds before and 30 seconds after** the selected
-attack. The automatic correlator still runs once before the UI with its own
-unchanged defaults (60s before, 240s after, and a strict 5s scoring limit).
-`--window-before` and `--window-after` can override both modes' defaults.
+Manual review defaults to **0 seconds before and 30 seconds after** an attack.
+Automatic correlation (when enabled) keeps its own unchanged defaults
+(60 seconds before, 240 seconds after, and a 5-second scoring delta).
+The `--window-before` and `--window-after` flags override both windows.
 
-Attacks with automatic correlations are highlighted in cyan and marked `A`.
-Logfiles are highlighted in cyan when they have automatic correlations for
-the selected attack; each filename is prefixed with `(N)`, the number of
-**distinct automatically correlated lines** (or `(0)` when there are none).
-These counts are unaffected by manual selections and may include matches outside
-the visible manual-review time window.
+With `--include-auto`, attacks and files with automatic matches are highlighted
+in cyan; the file pane shows `(N)` for the number of distinct automatic
+matches. Those lines are marked by default (`*`), and an `A` indicates
+an automatic match even if it is deselected. Press `a` to toggle **all**
+automatic marks at once, without changing other manual marks. Space toggles
+the currently focused log line. Selections are stored per attack step and
+written as raw lines grouped by logfile. Automatic matches outside the visible
+time window can still be included in the output if loaded and marked.
 
-Automatic log-line matches are also cyan with an `A` marker and are **selected
-by default**. `*` means the line will be exported. Space toggles selection
-for both automatic and manually chosen lines. Selections are tracked per attack
-step; automatically selected lines outside the visible time window remain in
-the export unless you expand the window and deselect them.
+### Search
 
-The timestamp heatmap is enabled by default: the timestamp closest to the
-attack time is **red**, the farthest timestamp in the displayed file/window is
-**blue**, and intermediate timestamps receive cooler shades. Only the timestamp
-is shaded. Toggle the heatmap with `c`.
+`Ctrl+F` opens a search bar for **all log lines within the current attack's
+time window**, across matching logfiles. `Ctrl+Shift+F` requests an
+**all-lines search across the discovered logfile collection**, including lines
+outside the time window and files without timestamps.
 
-Keys: `Space` marks/unmarks a log line; `s` saves marked lines to a file;
-`Tab` or left/right arrows switches between panes; up/down (or `j/k`)
-navigates; Home/End (Pos1/End) jumps to the first/last entry; `[` / `]`
-(or `p/n`) selects the previous/next attack. `+` / `-` adjusts the
-**post-attack** window by 10 seconds; `t` sets separate *before* and
-*after* offsets; `c` toggles the heatmap, `h/l` scrolls horizontally,
-and `q` saves and exits. The bottom hints now use explicit, pipe-separated labels.
+**Terminal limitation:** Many terminals send exactly the same input for
+Ctrl+Shift+F as Ctrl+F. Use capital **`F`** (Shift+F) for the all-lines
+search reliably; modified Ctrl+Shift+F is also recognized when the terminal
+sends a distinct CSI key sequence. Search results temporarily replace the
+file/log lists with matches; you can mark them with Space. Press Escape to
+return to ordinary time-window browsing, or switch attacks to clear the search.
+Both searches are literal, with case-insensitive ASCII text matching, and the
+all-lines search scans the source files on demand (up to 2,000 matches).
 
-The browser writes **one new text file per session** at
-`output/manual_selection_<timestamp>.txt`. It contains the selected raw lines,
-grouped under AttackMate step and source-logfile headings. Previous selection
-files are not overwritten. Automatic JSON/CSV correlation exports remain
-unchanged. `--manual` cannot be used with `--view-existing` or `--no-ui`.
+Search for raw bytes using `\xNN` escapes, for example `\xef`. Byte searches
+are exact, can mix text and hex escapes, and work with non-UTF8 source bytes.
+Invalid UTF-8 bytes are displayed as printable `\xNN` escapes in results.
+
+The timestamp heatmap is on by default: closest timestamps **red**, farthest
+timestamps **blue**, with colors applied only to timestamp text. Press `c` to
+toggle the heatmap.
+
+### Keys
+
+`Space` marks/unmarks a log line; `s` saves marked lines to one text file;
+`a` toggles automatic marks; `Ctrl+F` searches the window; `F` searches all
+log lines; Escape closes the search. Tab/left/right switches panes;
+up/down or `j/k` navigates; Home/End jumps to the first/last entry;
+`[` / `]` or `p/n` moves between attacks; `+/-` adjusts the post-attack window
+by 10 seconds; `t` sets separate before/after offsets; `h/l` scrolls long lines
+horizontally; `q` saves and exits.
+
+Each session writes `output/manual_selection_<timestamp>.txt`, containing
+the selected raw log lines, grouped by AttackMate step and source logfile.
+Saved automatic correlations are read-only in `--view-existing` mode.
 
 ## Important options
 
 - `--host-config`: JSON config for host timezones, aliases, clock skew, IP addresses, and attacker timezones.
-- `--manual`: open the separate manual evidence-review browser after automatic correlation.
+- `--manual`: open the manual evidence-review browser without automatic correlation by default.
+- `--include-auto`: with `--manual`, run automatic correlation or reuse its saved results and preload matches as marked.
 - `--strict`: opt in to reading only files matching the log-type configuration; use only their configured timestamp parser (no fallback guessing).
 - `--log-config`: JSON filename-pattern configuration for strict mode (default: the bundled `logtypes.json`). This flag requires `--strict`.
 - `--max-time-delta`: strict maximum absolute timestamp delta for timestamped attack/log pairs before content scoring is attempted; defaults to `5.0`.
@@ -92,7 +112,7 @@ unchanged. `--manual` cannot be used with `--view-existing` or `--no-ui`.
 - `--window-before` / `--window-after`: broad correlation time window around each attack.
 - `--max-per-attack`: maximum saved correlations per attack step.
 - `--process-untimestamped-lines`: opt in to loading lines that have no parseable timestamp. By default, those lines are counted but skipped for performance.
-- `--view-existing`: open `correlations.json` from the working directory's `output` subdirectory without recomputing.
+- `--view-existing`: open saved correlations in the automatic browser, or reuse saved attacks/matches with `--manual` without recomputing.
 - `--history [FILE]`: append one indented JSON record per computation, separated by a blank line, including package version, Git revision (when available), source checksum, scoring settings and a copy of `summary.json`. With no FILE argument, writes to `<root>/run-history.jsonl`; relative FILE paths are resolved under `--root`. The file must end in `.jsonl` to avoid corrupting ordinary JSON or CSV exports. No entry is appended in `--view-existing` mode.
 
 ## Log-type configuration

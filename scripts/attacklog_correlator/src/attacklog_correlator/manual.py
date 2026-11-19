@@ -21,6 +21,9 @@ from attacklog_correlator.models import Attack, Correlation, LogEvent, UTC
 from attacklog_correlator.tui import sanitize_preview_text
 
 
+SEARCH_ALL_KEY = 0x110000
+
+
 @dataclass(frozen=True)
 class ManualLine:
     line_number: int
@@ -129,6 +132,35 @@ def indexed_lines_in_window(
     return lines
 
 
+
+def parse_search_query(query: str) -> tuple[bytes, bool]:
+    r"""Turn \xNN escapes into literal bytes; otherwise use a text search."""
+    if not query or re.search(r"\\x(?![0-9a-fA-F]{2})", query):
+        raise ValueError("Enter text or valid \\xNN byte escapes")
+    parts = re.split(r"(\\x[0-9a-fA-F]{2})", query)
+    has_hex = any(re.fullmatch(r"\\x[0-9a-fA-F]{2}", part) for part in parts)
+    needle = b"".join(
+        bytes([int(part[2:], 16)]) if re.fullmatch(r"\\x[0-9a-fA-F]{2}", part)
+        else part.encode("utf-8") for part in parts
+    )
+    return needle, has_hex
+
+
+def iter_search_lines(path: Path):
+    """Yield source line numbers and raw bytes; preserve non-UTF8 bytes for hex search."""
+    if readers.should_try_journalctl(path):
+        with closing(readers.run_journalctl_export(path)) as lines:
+            for line_number, line in enumerate(lines, 1):
+                yield line_number, line.encode("utf-8")
+    else:
+        if readers.is_probably_binary_file(path):
+            return
+        with path.open("rb") as stream:
+            for line_number, line in enumerate(stream, 1):
+                yield line_number, line.rstrip(b"\r\n")
+
+
+
 class ManualBrowser:
     """Three-pane curses browser; selections are scoped to an attack and source line."""
 
@@ -169,6 +201,8 @@ class ManualBrowser:
         self._view_key: Optional[tuple] = None
         self.lines: list[ManualLine] = []
         self.distance_range = (0.0, 0.0)
+        self.search_results: Optional[dict[Path, list[ManualLine]]] = None
+        self.search_query = ""
 
         # A source line can correlate with several attack steps. Keep those selections independent.
         self.automatic = {(c.attack_id, c.event_file, c.event_line) for c in correlations}
@@ -180,6 +214,7 @@ class ManualBrowser:
             (c.attack_id, c.event_file, c.event_line): source_text.get((c.event_file, c.event_line), c.event_message)
             for c in correlations
         }
+        self._complete_text = {key for key in self.text_by_key if (key[1], key[2]) in source_text}
         self.out_dir = out_dir
         self.output_path = out_dir / f"manual_selection_{dt.datetime.now(UTC):%Y%m%dT%H%M%S%fZ}.txt"
         self._saved = False
@@ -215,6 +250,8 @@ class ManualBrowser:
 
     def _update_files(self) -> None:
         """Use indexed timestamps to determine visible files for every attack."""
+        if self.search_results is not None:
+            return
         if self._timestamps is None or self.active_attack_index is None:
             return
         key = (self.before, self.after)
@@ -254,6 +291,21 @@ class ManualBrowser:
 
     def _load_lines(self) -> None:
         self._update_files()
+        if self.search_results is not None:
+            if not self.visible_files:
+                self.lines = []
+                return
+            key = ("search", self.active_attack_index, self.file_index, self.search_query)
+            if key != self._view_key:
+                self._view_key = key
+                self.lines = self.search_results[self.visible_files[self.file_index]]
+                self.line_index = 0
+                self.line_top = 0
+                attack_time = self.attacks[self.active_attack_index].timestamp
+                distances = [abs((row.timestamp - attack_time).total_seconds())
+                             for row in self.lines if row.timestamp is not None]
+                self.distance_range = (min(distances), max(distances)) if distances else (0, 0)
+            return
         if self.active_attack_index is None or not self.visible_files:
             self.lines = []
             self.distance_range = (0.0, 0.0)
@@ -294,6 +346,7 @@ class ManualBrowser:
         if self.active_attack_index is not None and self.lines:
             self._preferred_line = self.lines[self.line_index].line_number
         self.active_attack_index = self.attack_index
+        self.clear_search()
         self._files_key = None
         self._view_key = None
         self._load_lines()
@@ -309,6 +362,121 @@ class ManualBrowser:
         else:
             self.selected.add(key)
             self.text_by_key[key] = line.text
+            self._complete_text.add(key)
+
+    def toggle_auto_marks(self) -> None:
+        if not self.automatic:
+            self.status = "No automatic correlations loaded"
+        elif self.selected.intersection(self.automatic):
+            self.selected.difference_update(self.automatic)
+            self.status = "Automatic matches deselected"
+        else:
+            self.selected.update(self.automatic)
+            self.status = "Automatic matches selected"
+
+    def clear_search(self) -> None:
+        if self.search_results is None:
+            return
+        current = self.visible_files[self.file_index] if self.visible_files else None
+        self.search_results = None
+        self.search_query = ""
+        self.visible_files = []
+        self._files_key = None
+        self._view_key = None
+        self._update_files()
+        if current in self.visible_files:
+            self.file_index = self.visible_files.index(current)
+        self._view_key = None
+
+    def search(self, query: str, *, all_lines: bool = False) -> int:
+        """Search all discovered logfiles, showing matching raw lines in the panes."""
+        needle, exact_bytes = parse_search_query(query)
+        if self.active_attack_index is None:
+            return 0
+        self._index_files()
+        self._update_files()
+        candidate_files = self.files if all_lines else self._window_files[self.active_attack_index]
+        matches: dict[Path, list[ManualLine]] = {}
+        target = needle if exact_bytes else needle.lower()
+        total = 0
+        errors = 0
+        # shortcut: cap retained matches to bound memory for broad searches.
+        for path in candidate_files:
+            stamps = self._timestamps.get(path, [])
+            by_line = {stamp.line_number: stamp for stamp in stamps}
+            in_window = False
+            selected_lines = ({stamp.line_number for stamp in
+                               self._matching_stamps(path, self.attacks[self.active_attack_index])}
+                              if not all_lines else set())
+            found = []
+            try:
+                with closing(iter_search_lines(path)) as lines:
+                    for number, raw in lines:
+                        if not all_lines:
+                            if number in by_line:
+                                in_window = number in selected_lines
+                            if not in_window:
+                                continue
+                        if target not in (raw if exact_bytes else raw.lower()):
+                            continue
+                        text = raw.decode("utf-8", errors="backslashreplace")
+                        stamp = by_line.get(number)
+                        span = timestamp_span(text, stamp.raw_timestamp) if stamp else None
+                        found.append(ManualLine(number, text, stamp.time if stamp else None, span))
+                        total += 1
+                        if total >= 2000:
+                            break
+            except (OSError, RuntimeError, ValueError):
+                errors += 1
+                continue
+            if found:
+                matches[path] = found
+            if total >= 2000:
+                break
+
+        if not matches:
+            self.clear_search()
+            self.status = f"No matches for {query!r}" + (f" ({errors} unreadable files)" if errors else "")
+            return 0
+        self.search_results = matches
+        self.search_query = query
+        self.visible_files = list(matches)
+        self.file_index = 0
+        self.line_index = 0
+        self._view_key = None
+        self.focus = "lines"
+        self._load_lines()
+        scope = "all logs" if all_lines else "current time window"
+        self.status = f"{total} matches in {scope}: {query!r} | Esc: return"
+        if total == 2000:
+            self.status += " (first 2000)"
+        return total
+
+    def _prompt_search(self, screen, *, all_lines: bool = False) -> None:
+        height, width = screen.getmaxyx()
+        if height < 7 or width < 45:
+            self.status = "Terminal too small for search"
+            return
+        size = min(74, width - 4)
+        popup = curses.newwin(5, size, (height - 5) // 2, (width - size) // 2)
+        popup.box()
+        label = "Search ALL log lines" if all_lines else "Search current attack time window"
+        self._write(popup, 1, 2, label, size - 4)
+        self._write(popup, 2, 2, r"Text or bytes (\xef); Enter to search", size - 4)
+        popup.refresh()
+        curses.echo()
+        try:
+            curses.curs_set(1)
+            query = popup.getstr(3, 2, min(256, size - 4)).decode("utf-8").strip()
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
+        if not query or query.startswith("\x1b"):
+            return
+        try:
+            self.search(query, all_lines=all_lines)
+        except ValueError as exc:
+            self.status = str(exc)
 
     def change_window(self, seconds: float) -> None:
         # Keep the before offset unchanged; +/- extends the post-attack window.
@@ -321,6 +489,7 @@ class ManualBrowser:
         self._window_key = None
         self._files_key = None
         self._view_key = None
+        self.clear_search()
 
     def _prompt_window(self, screen) -> None:
         height, width = screen.getmaxyx()
@@ -351,6 +520,21 @@ class ManualBrowser:
 
     def save(self) -> Path:
         """Write raw selected lines, grouped by attack and source file, to one text file."""
+        # Saved correlations contain previews, so recover original lines before export.
+        missing: dict[str, dict[int, list[tuple[str, str, int]]]] = defaultdict(lambda: defaultdict(list))
+        for key in self.selected - self._complete_text:
+            missing[key[1]][key[2]].append(key)
+        for filename, wanted in missing.items():
+            try:
+                with closing(iter_search_lines(Path(filename))) as lines:
+                    for number, raw in lines:
+                        for key in wanted.pop(number, []):
+                            self.text_by_key[key] = raw.decode("utf-8", errors="backslashreplace")
+                            self._complete_text.add(key)
+                        if not wanted:
+                            break
+            except (OSError, RuntimeError):
+                pass
         selected_by_attack: dict[str, dict[str, list[tuple[int, str]]]] = defaultdict(lambda: defaultdict(list))
         for attack_id, file_name, line_number in self.selected:
             text = self.text_by_key[(attack_id, file_name, line_number)]
@@ -378,14 +562,28 @@ class ManualBrowser:
             fh.write("\n".join(output) + ("\n" if output else ""))
         temporary.replace(self.output_path)
         self._saved = True
+        unresolved = sum(len(keys) for by_line in missing.values() for keys in by_line.values())
         self.status = f"Saved {len(self.selected)} lines: {self.output_path.name}"
+        if unresolved:
+            self.status += f" ({unresolved} source lines unavailable; used previews)"
         return self.output_path
 
     def handle_key(self, key: int, screen=None) -> bool:
-        if key in (ord("q"), 27):
+        if key == ord("q"):
             return False
-        if key == ord("s"):
+        if key == 27:
+            if self.search_results is None:
+                return False
+            self.clear_search()
+            self.status = "Returned to current attack time window"
+        elif key == ord("s"):
             self.save()
+        elif key == ord("a"):
+            self.toggle_auto_marks()
+        elif key == 6 and screen is not None:
+            self._prompt_search(screen)
+        elif key in (ord("F"), SEARCH_ALL_KEY) and screen is not None:
+            self._prompt_search(screen, all_lines=True)
         elif key == 9:
             panes = ("attacks", "files", "lines")
             self.focus = panes[(panes.index(self.focus) + 1) % 3]
@@ -482,7 +680,7 @@ class ManualBrowser:
             win.box()
         self._write(attacks_win, 0, 2, f" Attacks ({len(self.attacks)}) ", attack_width - 4)
         self._write(files_win, 0, 2, f" Files ({len(self.visible_files)}) ", file_width - 4)
-        self._write(logs_win, 0, 2, f" Log lines ({len(self.lines)}) ", log_width - 4)
+        self._write(logs_win, 0, 2, f" {'Search matches' if self.search_results is not None else 'Log lines'} ({len(self.lines)}) ", log_width - 4)
 
         attack_rows = body_height - 2
         self.attack_top = self._scroll(self.attack_index, self.attack_top, attack_rows)
@@ -500,7 +698,7 @@ class ManualBrowser:
         for i in range(self.file_top, min(len(self.visible_files), self.file_top + attack_rows)):
             path = self.visible_files[i]
             count = self.auto_counts[(self.attacks[self.active_attack_index].attack_id, str(path))]
-            name = f"({count}) {path.relative_to(self.log_root).as_posix()}"
+            name = (f"({count}) " if self.automatic else "") + path.relative_to(self.log_root).as_posix()
             attr = self.auto_attr if count else 0
             if self.focus == "files" and i == self.file_index:
                 attr |= curses.A_REVERSE
@@ -550,12 +748,39 @@ class ManualBrowser:
         footer = f"{len(self.selected)} marked | {self.status or 'A/cyan: correlator match'}"
         self._write(screen, height - 3, 0, footer, width - 1, curses.A_REVERSE)
         self._write(screen, height - 2, 0,
-                    "space: mark line | s: save marked lines to file | q: save & quit",
+                    "space: mark line | s: save marked lines to file | a: toggle auto | q: quit",
                     width - 1, curses.A_REVERSE)
         self._write(screen, height - 1, 0,
-                    "tab: pane | arrows: move | [ ]: attack | t: range | +/-: 10s | c: map",
+                    "Ctrl+F: search window | Ctrl+Shift+F/F: search all | Esc: close search | t: range",
                     width - 1, curses.A_REVERSE)
         screen.refresh()
+
+    @staticmethod
+    def _read_key(screen) -> int:
+        """Recognize modified Ctrl+Shift+F when a terminal sends distinct CSI keys."""
+        key = screen.getch()
+        if key != 27 or not hasattr(screen, "timeout"):
+            return key
+        screen.timeout(35)
+        sequence = []
+        try:
+            for _ in range(16):
+                value = screen.getch()
+                if value < 0:
+                    break
+                if value > 255:
+                    curses.ungetch(value)
+                    break
+                sequence.append(value)
+                if value in (ord("u"), ord("~")):
+                    break
+        finally:
+            screen.timeout(-1)
+        if bytes(sequence) in (b"[102;6u", b"[70;6u", b"[27;6;102~", b"[27;6;70~"):
+            return SEARCH_ALL_KEY
+        for value in reversed(sequence):
+            curses.ungetch(value)
+        return key
 
     def _main(self, screen) -> None:
         screen.keypad(True)
@@ -578,7 +803,7 @@ class ManualBrowser:
         self.activate_attack(screen)
         while True:
             self._draw(screen)
-            if not self.handle_key(screen.getch(), screen):
+            if not self.handle_key(self._read_key(screen), screen):
                 break
 
     def run(self) -> Path:

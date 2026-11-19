@@ -192,6 +192,9 @@ def test_manual_cli_flag_and_conflicting_modes(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["correlator", "--root", "work", "--manual", "--no-ui"])
     assert cli.main() == 2
     assert "cannot be combined" in capsys.readouterr().err
+    monkeypatch.setattr("sys.argv", ["correlator", "--root", "work", "--include-auto"])
+    assert cli.main() == 2
+    assert "requires --manual" in capsys.readouterr().err
 
 
 def test_attack_details_show_only_command_and_description(tmp_path):
@@ -429,34 +432,68 @@ def test_window_recalculation_uses_cached_index_for_all_attacks(tmp_path, monkey
     assert browser.visible_files == [first, second]
 
 
-def test_cli_manual_window_defaults_do_not_change_automatic_correlation(tmp_path, monkeypatch):
+def test_cli_manual_only_skips_scoring_and_keeps_window_defaults(tmp_path, monkeypatch):
     from attacklog_correlator import cli
 
     observed = {}
-
     class Browser:
         def __init__(self, *args):
             observed["manual"] = args[7:9]
+            observed["correlations"] = args[2]
 
         def run(self):
             return tmp_path / "manual.txt"
 
     monkeypatch.setattr(manual, "ManualBrowser", Browser)
-    monkeypatch.setattr(cli, "load_all_attacks", lambda *_a, **_kw: [])
-    def load_events(*_args, **kwargs):
-        observed["automatic"] = kwargs["window_before"], kwargs["window_after"]
-        return []
-    monkeypatch.setattr(cli, "load_all_events", load_events)
-    monkeypatch.setattr(cli, "correlate", lambda *_a, **_kw: [])
-    monkeypatch.setattr(cli, "export_outputs", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cli, "load_all_attacks", lambda *_a, **_kw: [make_attack()])
+    def forbidden(*_a, **_kw):
+        raise AssertionError("manual mode must not run lexical correlation")
+    monkeypatch.setattr(cli, "load_all_events", forbidden)
+    monkeypatch.setattr(cli, "correlate", forbidden)
+    monkeypatch.setattr(cli, "export_outputs", forbidden)
 
-    for flags, manual_window, automatic_window in [
-        ([], (0.0, 30.0), (60.0, 240.0)),
-        (["--window-before", "5", "--window-after", "50"], (5.0, 50.0), (5.0, 50.0)),
+    for flags, expected in [
+        ([], (0.0, 30.0)),
+        (["--window-before", "5", "--window-after", "50"], (5.0, 50.0)),
     ]:
         monkeypatch.setattr("sys.argv", ["correlator", "--root", str(tmp_path), "--manual"] + flags)
         assert cli.main() == 0
-        assert observed == {"manual": manual_window, "automatic": automatic_window}
+        assert observed == {"manual": expected, "correlations": []}
+
+
+def test_cli_include_auto_opt_in_and_saved_manual_view(tmp_path, monkeypatch):
+    from attacklog_correlator import cli
+
+    seen = {}
+    correlation = SimpleNamespace(attack_id="a", event_file="x", event_line=1, event_message="match")
+    class Browser:
+        def __init__(self, *args):
+            seen["correlations"] = args[2]
+        def run(self):
+            return tmp_path / "manual.txt"
+
+    monkeypatch.setattr(manual, "ManualBrowser", Browser)
+    monkeypatch.setattr(cli, "load_all_attacks", lambda *_a, **_kw: [make_attack()])
+    monkeypatch.setattr(cli, "load_all_events", lambda *_a, **_kw: [])
+    monkeypatch.setattr(cli, "correlate", lambda *_a, **_kw: [correlation])
+    monkeypatch.setattr(cli, "export_outputs", lambda *_a, **_kw: None)
+    monkeypatch.setattr("sys.argv", ["correlator", "--root", str(tmp_path), "--manual", "--include-auto"])
+    assert cli.main() == 0
+    assert seen["correlations"] == [correlation]
+
+    def forbidden(*_a, **_kw):
+        raise AssertionError("saved manual review should not recompute")
+    monkeypatch.setattr(cli, "load_all_attacks", forbidden)
+    monkeypatch.setattr(cli, "load_all_events", forbidden)
+    monkeypatch.setattr(cli, "correlate", forbidden)
+    monkeypatch.setattr(cli, "load_existing_outputs",
+                        lambda _out: ([make_attack()], [correlation], {}))
+    for flags, expected in [([], []), (["--include-auto"], [correlation])]:
+        monkeypatch.setattr("sys.argv", [
+            "correlator", "--root", str(tmp_path), "--manual", "--view-existing", *flags
+        ])
+        assert cli.main() == 0
+        assert seen["correlations"] == expected
 
 
 def test_index_is_created_at_ui_startup(tmp_path, monkeypatch):
@@ -596,5 +633,115 @@ def test_footer_uses_descriptive_pipe_separated_labels(tmp_path):
     screen = Screen()
     browser._draw(screen)
     assert "space: mark line | s: save marked lines to file" in screen.lines[22]
-    assert "tab: pane | arrows: move" in screen.lines[23]
+    assert "Ctrl+F: search window" in screen.lines[23]
+    assert "Ctrl+Shift+F/F: search all" in screen.lines[23]
     assert "Home/End" not in screen.lines[23]
+
+
+def test_window_search_finds_current_attack_matches_in_multiple_files(tmp_path):
+    first = tmp_path / "host" / "syslog"
+    second = tmp_path / "host" / "auth.log"
+    first.parent.mkdir()
+    first.write_text("Nov 18 12:00:05 host error in window\n"
+                     "continued error text\n"
+                     "Nov 18 12:01:00 host error outside window\n")
+    second.write_text("Nov 18 12:00:10 host another ERROR\n")
+    browser = ManualBrowser([make_attack()], [first, second], [], [], tmp_path,
+                            make_resolver(), 2026, 0, 30, tmp_path / "output")
+    browser.activate_attack()
+    assert browser.search("error") == 3
+    assert browser.visible_files == [first, second]
+    assert [line.line_number for line in browser.lines] == [1, 2]
+    browser.focus = "lines"
+    browser.handle_key(manual.curses.KEY_END)
+    browser.toggle_selected()
+    assert browser.lines[1].text == "continued error text"
+    assert browser.handle_key(27) is True  # Escape returns to time-window browsing
+    assert browser.search_results is None
+    assert len(browser.visible_files) == 2
+
+
+def test_hex_search_finds_original_invalid_utf8_even_outside_window(tmp_path):
+    timed = tmp_path / "host" / "syslog"
+    undated = tmp_path / "host" / "untimed.log"
+    timed.parent.mkdir()
+    timed.write_bytes(b"Nov 18 12:00:05 host normal\n"
+                      b"Nov 18 12:02:00 host special \xef byte\n")
+    undated.write_bytes(b"plain \xef no timestamp\n")
+    browser = ManualBrowser([make_attack()], [timed, undated], [], [],
+                            tmp_path, make_resolver(), 2026, 0, 30,
+                            tmp_path / "output")
+    browser.activate_attack()
+    assert browser.search(r"\xef") == 0
+    assert browser.search(r"\xef", all_lines=True) == 2
+    assert browser.visible_files == [timed, undated]
+    assert r"\xef" in browser.lines[0].text
+    browser.toggle_selected()
+    browser.file_index = 1
+    browser._load_lines()
+    browser.toggle_selected()
+    text = browser.save().read_text()
+    assert r"\xef" in text
+    assert "special" in text and "no timestamp" in text
+
+
+def test_search_query_escapes_and_invalid_sequences():
+    assert manual.parse_search_query(r"\xef") == (bytes([0xef]), True)
+    assert manual.parse_search_query(r"GET \xef") == (b"GET \xef", True)
+    assert manual.parse_search_query("Failed password") == (b"Failed password", False)
+    import pytest
+    with pytest.raises(ValueError, match="escape"):
+        manual.parse_search_query(r"\xZZ")
+
+
+def test_toggle_all_auto_marks_preserves_manual_marks(tmp_path):
+    browser, _ = make_browser(tmp_path, [
+        "Nov 18 12:00:00 target auto", "Nov 18 12:00:01 target manual",
+    ])
+    browser.focus = "lines"
+    browser.handle_key(manual.curses.KEY_END)
+    browser.toggle_selected()
+    assert len(browser.selected) == 2
+    browser.handle_key(ord("a"))
+    assert len(browser.selected) == 1
+    assert not (browser.selected & browser.automatic)
+    browser.handle_key(ord("a"))
+    assert len(browser.selected) == 2
+
+
+def test_saved_auto_previews_are_resolved_to_full_raw_lines(tmp_path):
+    full = "Nov 18 12:00:00 target " + "very long content " * 100
+    browser, path = make_browser(tmp_path, [full])
+    key = browser._key(browser.lines[0])
+    browser.text_by_key[key] = "truncated saved preview"
+    browser._complete_text.clear()
+    saved = browser.save().read_text()
+    assert full in saved
+    assert "truncated saved preview" not in saved
+
+
+def test_search_popup_and_modified_control_key(tmp_path, monkeypatch):
+    browser, _ = make_browser(tmp_path, ["Nov 18 12:00:00 target failed password"])
+    class Popup:
+        def box(self): pass
+        def addnstr(self, *_a): pass
+        def refresh(self): pass
+        def getstr(self, *_a): return b"Failed"
+    monkeypatch.setattr(manual.curses, "newwin", lambda *_a: Popup())
+    monkeypatch.setattr(manual.curses, "echo", lambda: None)
+    monkeypatch.setattr(manual.curses, "noecho", lambda: None)
+    monkeypatch.setattr(manual.curses, "curs_set", lambda *_a: None)
+    screen = SimpleNamespace(getmaxyx=lambda: (24, 110))
+    browser.handle_key(6, screen)
+    assert browser.search_results is not None
+    assert browser.search_query == "Failed"
+    browser.handle_key(ord("F"), screen)
+    assert browser.search_results is not None
+
+    class EnhancedKeys:
+        def __init__(self):
+            self.values = [27] + [ord(char) for char in "[102;6u"]
+        def getch(self):
+            return self.values.pop(0) if self.values else -1
+        def timeout(self, _ms): pass
+    assert browser._read_key(EnhancedKeys()) == manual.SEARCH_ALL_KEY

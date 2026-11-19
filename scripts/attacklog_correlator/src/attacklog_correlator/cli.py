@@ -70,7 +70,9 @@ def parse_args() -> argparse.Namespace:
         "--history", nargs="?", const="run-history.jsonl", metavar="FILE",
         help="Append version, settings and summary.json to FILE (default: <root>/run-history.jsonl)",
     )
-    p.add_argument("--manual", action="store_true", help="Review and select log lines in a separate curses browser")
+    p.add_argument("--manual", action="store_true", help="Browse and manually mark log lines without automatic correlation")
+    p.add_argument("--include-auto", action="store_true",
+                   help="With --manual, load automatic correlations (from --view-existing or a fresh run)")
     p.add_argument("--no-ui", action="store_true", help="Write outputs only")
     return p.parse_args()
 
@@ -105,8 +107,11 @@ def main() -> int:
         print("[error] time limits must be non-negative and --max-per-attack must be positive", file=sys.stderr)
         return 2
 
-    if args.manual and (args.view_existing or args.no_ui):
-        print("[error] --manual cannot be combined with --view-existing or --no-ui", file=sys.stderr)
+    if args.manual and args.no_ui:
+        print("[error] --manual cannot be combined with --no-ui", file=sys.stderr)
+        return 2
+    if args.include_auto and not args.manual:
+        print("[error] --include-auto requires --manual", file=sys.stderr)
         return 2
 
     if args.log_config and not args.strict:
@@ -126,7 +131,7 @@ def main() -> int:
             return 2
 
 
-    if args.view_existing:
+    if args.view_existing and not args.manual:
         attacks, correlations, saved_summary = load_existing_outputs(out_dir)
         summary = {
             "mode": "view-existing",
@@ -181,47 +186,70 @@ def main() -> int:
 
     resolver = HostResolver(config)
 
-    # The core pipeline.  Nothing is correlated until both sides have been
-    # normalized into Attack and LogEvent objects.
-    attacks = load_all_attacks(attack_root, resolver, config=config)
-    # attacks may reveal additional hostnames via IP mapping in config; reload not necessary
-    stats = RunStats()
-    events = load_all_events(
-        log_root, attack_root, args.default_year, resolver,
-        include_untimestamped=args.process_untimestamped_lines,
-        attacks=attacks, window_before=args.window_before, window_after=args.window_after, stats=stats,
-        max_time_delta=args.max_time_delta, log_types=log_types,
-    )
-    correlations = correlate(attacks, events, args.window_before, args.window_after, args.max_per_attack,
-                             max_time_delta=args.max_time_delta)
-    export_outputs(out_dir, config, attacks, events, correlations, processed_event_count=stats.parsed_events,
-                   stats=stats, max_time_delta=args.max_time_delta)
-    if history_path is not None:
+    # Manual review is a browsing tool by default; correlation is opt-in.
+    if args.view_existing:
         try:
-            append_run_history(history_path, out_dir / "summary.json", args)
-        except OSError as exc:
-            print(f"[error] failed to append run history: {exc}", file=sys.stderr)
+            attacks, saved_correlations, _ = load_existing_outputs(out_dir)
+        except (OSError, ValueError) as exc:
+            print(f"[error] cannot load saved correlations: {exc}", file=sys.stderr)
             return 1
+        correlations = saved_correlations if args.include_auto else []
+        events = []
+    else:
+        attacks = load_all_attacks(attack_root, resolver, config=config)
+        correlations = []
+        events = []
+        if not args.manual or args.include_auto:
+            stats = RunStats()
+            events = load_all_events(
+                log_root, attack_root, args.default_year, resolver,
+                include_untimestamped=args.process_untimestamped_lines,
+                attacks=attacks, window_before=args.window_before,
+                window_after=args.window_after, stats=stats,
+                max_time_delta=args.max_time_delta, log_types=log_types,
+            )
+            correlations = correlate(
+                attacks, events, args.window_before, args.window_after,
+                args.max_per_attack, max_time_delta=args.max_time_delta,
+            )
+            export_outputs(out_dir, config, attacks, events, correlations,
+                           processed_event_count=stats.parsed_events,
+                           stats=stats, max_time_delta=args.max_time_delta)
+            if history_path is not None:
+                try:
+                    append_run_history(history_path, out_dir / "summary.json", args)
+                except OSError as exc:
+                    print(f"[error] failed to append run history: {exc}", file=sys.stderr)
+                    return 1
 
-
-    summary = {
-        "attacks": len(attacks),
-        "events": stats.parsed_events,
-        "candidate_events": len(events),
-        "correlations": len(correlations),
-        "unparsable_lines": stats.unparsable_lines,
-        "journalctl_converted_files": stats.journalctl_converted_files,
-        "binary_log_files_skipped": stats.binary_log_files_skipped,
-        "untimestamped_lines_loaded": args.process_untimestamped_lines,
-        "strict": args.strict,
-        "log_config": str(Path(args.log_config).expanduser().resolve()) if args.log_config else None,
-        "attack_root": str(attack_root),
-        "log_root": str(log_root),
-        "out_dir": str(out_dir),
-        "host_config": str(host_config_path) if host_config_path else None,
-        "generated_host_config": str(out_dir / "host_config.generated.json"),
-    }
-    print(json.dumps(summary, indent=2))
+    if args.manual:
+        print(json.dumps({
+            "mode": "manual",
+            "attacks": len(attacks),
+            "automatic_correlations": len(correlations),
+            "source": "saved" if args.view_existing else ("computed" if args.include_auto else "manual-only"),
+            "log_root": str(log_root),
+            "out_dir": str(out_dir),
+        }, indent=2))
+    else:
+        summary = {
+            "attacks": len(attacks),
+            "events": stats.parsed_events,
+            "candidate_events": len(events),
+            "correlations": len(correlations),
+            "unparsable_lines": stats.unparsable_lines,
+            "journalctl_converted_files": stats.journalctl_converted_files,
+            "binary_log_files_skipped": stats.binary_log_files_skipped,
+            "untimestamped_lines_loaded": args.process_untimestamped_lines,
+            "strict": args.strict,
+            "log_config": str(Path(args.log_config).expanduser().resolve()) if args.log_config else None,
+            "attack_root": str(attack_root),
+            "log_root": str(log_root),
+            "out_dir": str(out_dir),
+            "host_config": str(host_config_path) if host_config_path else None,
+            "generated_host_config": str(out_dir / "host_config.generated.json"),
+        }
+        print(json.dumps(summary, indent=2))
 
     if args.manual:
         try:
