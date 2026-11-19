@@ -19,6 +19,7 @@ from attacklog_correlator.manual_ui import SEARCH_ALL_KEY
 from attacklog_correlator.manual_logs import (
     IndexedTimestamp, ManualLine, attack_details, indexed_lines_in_window,
     index_log_file, iter_search_lines, parse_search_query, search_match_spans,
+    timestamp_span,
 )
 
 

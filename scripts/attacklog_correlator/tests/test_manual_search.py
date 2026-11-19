@@ -21,6 +21,7 @@ def test_window_search_finds_current_attack_matches_in_multiple_files(tmp_path):
     assert browser.search("error") == 3
     assert browser.visible_files == [first, second]
     assert [line.line_number for line in browser.lines] == [1, 2]
+    assert browser.lines[0].timestamp_span == (0, len("Nov 18 12:00:05"))
     browser.focus = "lines"
     browser.handle_key(manual.curses.KEY_END)
     browser.toggle_selected()
