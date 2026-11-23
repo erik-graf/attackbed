@@ -3,16 +3,14 @@
 import json
 from contextlib import redirect_stdout
 from io import StringIO
-import os
 from pathlib import Path
-import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from attackbed import cli, deploy, images, ssh
+from attackbed.errors import AttackBedError, CommandError
 
 
 def image(name, image_id, created):
@@ -90,7 +88,7 @@ class WorkflowTests(unittest.TestCase):
         selections = []
 
         def run(*args, **kwargs):
-            selections.append(os.environ.get("ATTACKBED_IMAGES_FILE"))
+            selections.append(kwargs["env_override"].get("ATTACKBED_IMAGES_FILE"))
             return 0
 
         with patch.object(cli, "connect", return_value=self.conn), \
@@ -116,7 +114,7 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(cli, "connect", return_value=self.conn), \
              patch.object(cli, "write_ssh_config") as ssh_write, \
              patch.object(deploy, "main", side_effect=[1, 0]):
-            with self.assertRaisesRegex(RuntimeError, "Terragrunt apply failed"):
+            with self.assertRaisesRegex(AttackBedError, "Terragrunt apply failed"):
                 cli.main(["deploy", "core"], self.root)
             self.images.append(image("atb-firewall-3", "44444444-4444-4444-4444-444444444444", "2026-04-01"))
             cli.main(["resume"], self.root)
@@ -141,7 +139,7 @@ class WorkflowTests(unittest.TestCase):
         selected_images = []
 
         def run(*args, **kwargs):
-            selected_images.append(os.environ.get("ATTACKBED_IMAGES_FILE"))
+            selected_images.append(kwargs["env_override"].get("ATTACKBED_IMAGES_FILE"))
             return 0
 
         with patch.object(cli, "connect", return_value=self.conn) as connect, \
@@ -182,7 +180,7 @@ class WorkflowTests(unittest.TestCase):
                "parallel_copies": 2, "tofu_parallelism": None, "deployed": True}
         cli.save_json(directory / "run.json", job)
         with patch.object(deploy, "main", return_value=1):
-            with self.assertRaisesRegex(RuntimeError, "Terragrunt destroy failed"):
+            with self.assertRaisesRegex(AttackBedError, "Terragrunt destroy failed"):
                 cli.main(["destroy", directory.name], self.root)
         self.assertEqual(json.loads((directory / "run.json").read_text()), job)
 
@@ -297,7 +295,7 @@ class WorkflowTests(unittest.TestCase):
             patch.object(images.subprocess, "run", side_effect=images.subprocess.CalledProcessError(1, "ansible-galaxy")) as run,
             patch.object(images.subprocess, "Popen") as popen,
         ):
-            with self.assertRaises(images.subprocess.CalledProcessError):
+            with self.assertRaises(CommandError):
                 images.build_image(self.conn, self.root, "firewall", self.root / "build.log")
         self.assertEqual(run.call_count, 1)
         popen.assert_not_called()

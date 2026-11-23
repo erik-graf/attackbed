@@ -2,12 +2,10 @@
 
 import os
 from pathlib import Path
-import sys
 import unittest
 from unittest import mock
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from attackbed import deploy
 
 
@@ -21,8 +19,11 @@ class ParallelismTests(unittest.TestCase):
                             process = popen.return_value.__enter__.return_value
                             process.stdout = []
                             process.wait.return_value = 0
-                            result = deploy.run_unit(Path("/tmp"), "lab-001", "bootstrap", action, override)
-                    self.assertEqual(result, 0)
+                            result = deploy.TerragruntDeployment(
+                                Path("/tmp"), "lab-001", ["bootstrap"],
+                                tofu_parallelism=override,
+                            ).run_unit("bootstrap", action)
+                    self.assertIsNone(result)
                     cmd = popen.call_args.args[0]
                     if action in ("apply", "destroy"):
                         self.assertIn("-auto-approve", cmd)
@@ -38,7 +39,7 @@ class ParallelismTests(unittest.TestCase):
                 process = popen.return_value.__enter__.return_value
                 process.stdout = []
                 process.wait.return_value = 0
-                deploy.run_unit(Path("/tmp"), "lab-001", "bootstrap", "apply")
+                deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"]).run_unit("bootstrap", "apply")
         self.assertNotIn("TF_VAR_parallelism", popen.call_args.kwargs["env"])
 
 

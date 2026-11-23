@@ -5,15 +5,14 @@ from io import BytesIO, StringIO
 import json
 import os
 from pathlib import Path
-import sys
 import tempfile
 import unittest
 from unittest import mock
 from urllib.error import HTTPError
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from attackbed import deploy
+from attackbed.errors import AttackBedError, CommandError
 
 
 ENV = {
@@ -29,30 +28,37 @@ class StateCleanupTests(unittest.TestCase):
     def test_failed_destroy_preserves_states(self):
         calls = []
 
-        def runner(root, deployment, unit, action, parallelism, logfile, debug):
+        def runner(deployment, unit, action):
             calls.append(unit)
-            return int(unit == "videoserver")
+            if unit == "videoserver":
+                raise CommandError("Terragrunt destroy", ["terragrunt", "destroy"], returncode=1)
 
-        with mock.patch.object(deploy, "delete_deployment_states") as delete:
-            result = deploy.run_deployment(Path("/tmp"), "lab-001",
-                                           ["bootstrap", "videoserver"], "destroy",
-                                           runner=runner)
-        self.assertEqual((result, calls), (1, ["videoserver"]))
+        with mock.patch.object(deploy.TerragruntDeployment, "run_unit", runner), \
+             mock.patch.object(deploy, "delete_deployment_states") as delete:
+            deployment = deploy.TerragruntDeployment(
+                Path("/tmp"), "lab-001", ["bootstrap", "videoserver"]
+            )
+            with self.assertRaises(CommandError):
+                deployment.run("destroy")
+        self.assertEqual(calls, ["videoserver"])
         delete.assert_not_called()
 
     def test_cleanup_only_after_every_destroy(self):
         calls = []
 
-        def runner(root, deployment, unit, action, parallelism, logfile, debug):
+        def runner(deployment, unit, action):
             calls.append(unit)
-            return 0
 
-        with mock.patch.object(deploy, "delete_deployment_states") as delete:
-            result = deploy.run_deployment(Path("/tmp"), "lab-001",
-                                           ["bootstrap", "videoserver"], "destroy",
-                                           runner=runner)
-        self.assertEqual((result, calls), (0, ["videoserver", "bootstrap"]))
-        delete.assert_called_once_with("lab-001", ["bootstrap", "videoserver"])
+        with mock.patch.object(deploy.TerragruntDeployment, "run_unit", runner), \
+             mock.patch.object(deploy, "delete_deployment_states") as delete:
+            deployment = deploy.TerragruntDeployment(
+                Path("/tmp"), "lab-001", ["bootstrap", "videoserver"]
+            )
+            deployment.run("destroy")
+        self.assertEqual(calls, ["videoserver", "bootstrap"])
+        delete.assert_called_once_with(
+            "lab-001", ["bootstrap", "videoserver"], env=deployment.env,
+        )
 
     def test_state_is_checked_before_delete(self):
         requests = []
@@ -104,30 +110,36 @@ class StateCleanupTests(unittest.TestCase):
                 fetch.assert_not_called()
 
     def test_cleanup_failure_reports_error(self):
-        with mock.patch.object(deploy, "delete_deployment_states",
-                               side_effect=RuntimeError("not empty")):
-            with redirect_stderr(StringIO()) as err:
-                result = deploy.run_deployment(Path("/tmp"), "lab-001", ["bootstrap"],
-                                               "destroy", runner=lambda *args: 0)
-        self.assertEqual(result, 1)
-        self.assertIn("state cleanup failed", err.getvalue())
+        with mock.patch.object(deploy.TerragruntDeployment, "run_unit"), \
+             mock.patch.object(deploy, "delete_deployment_states", side_effect=RuntimeError("not empty")):
+            deployment = deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"])
+            with self.assertRaisesRegex(AttackBedError, "state cleanup failed"):
+                deployment.run("destroy")
 
 
 class LoggingTests(unittest.TestCase):
     def test_failures_show_tail_and_redact_log(self):
-        with mock.patch.dict(os.environ, {"CR_GITLAB_ACCESS_TOKEN": "SECRET"}):
-            with mock.patch.object(deploy.subprocess, "Popen") as popen:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "terragrunt"
+            (root / "bootstrap").mkdir(parents=True)
+            (root / "bootstrap/terragrunt.hcl").touch()
+            (root.parent / "config").mkdir()
+            (root.parent / "config/scenarios.yaml").write_text("demo: [bootstrap]\n")
+            run_dir = root.parent / "runs" / "run-test"
+
+            with mock.patch.dict(os.environ, {"CR_GITLAB_ACCESS_TOKEN": "SECRET"}), \
+                 mock.patch.object(deploy.subprocess, "Popen") as popen:
                 process = popen.return_value.__enter__.return_value
                 process.stdout = ["SECRET\n", "Error: failure\n"]
                 process.wait.return_value = 1
-                log, err = StringIO(), StringIO()
-                with redirect_stderr(err), redirect_stdout(StringIO()):
-                    result = deploy.run_unit(Path("/tmp"), "lab-001", "bootstrap",
-                                             "destroy", log_file=log)
+                with redirect_stderr(StringIO()) as err, redirect_stdout(StringIO()):
+                    result = deploy.main(["demo", "plan", "--copies", "1"], root, run_dir)
+            log = (run_dir / "logs/plan.log").read_text()
+
         self.assertEqual(result, 1)
         self.assertIn("Error: failure", err.getvalue())
-        self.assertIn("[REDACTED]", log.getvalue())
-        self.assertNotIn("SECRET", log.getvalue() + err.getvalue())
+        self.assertIn("[REDACTED]", log)
+        self.assertNotIn("SECRET", log + err.getvalue())
 
     def test_logs_append_under_run_directory(self):
         with tempfile.TemporaryDirectory() as temp:

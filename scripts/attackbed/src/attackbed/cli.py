@@ -3,33 +3,40 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import sys
+import traceback
+from typing import Any, Sequence
 from uuid import uuid4
 
 import yaml
 
 from . import deploy
+from .errors import AttackBedError, redact
 from .images import active_image, build_image, latest_images, required_recipes
 from .ssh import write_ssh_config
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 
 
-def connect():
-    import openstack
+def connect() -> Any:
+    try:
+        import openstack
+    except ImportError as exc:
+        raise AttackBedError("OpenStack SDK is not installed; use uv to install CLI dependencies") from exc
     return openstack.connect()
 
 
-def save_json(path, value):
+def save_json(path: Path, value: object) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(value, indent=2) + "\n")
     temp.replace(path)
 
 
-def resume_directory(runs, requested):
+def resume_directory(runs: Path, requested: str) -> Path:
     if requested == "latest":
         jobs = sorted(path for path in runs.glob("run-*") if (path / "run.json").is_file())
         if not jobs:
@@ -42,28 +49,25 @@ def resume_directory(runs, requested):
         raise ValueError(f"Unknown run: {requested}")
     return directory
 
-def run_terragrunt(root, args, run_dir=None, images_file=None, debug=False):
-    previous_images = os.environ.get("ATTACKBED_IMAGES_FILE")
+def run_terragrunt(
+    root: Path, args: Sequence[str], run_dir: Path | None = None,
+    images_file: Path | None = None, debug: bool = False,
+) -> None:
+    # Pass the image selection to each subprocess, not via mutable global os.environ.
+    env_override = {}
     if run_dir is not None:
-        if images_file is not None:
-            os.environ["ATTACKBED_IMAGES_FILE"] = str(images_file.resolve())
-        else:
-            os.environ.pop("ATTACKBED_IMAGES_FILE", None)
+        env_override["ATTACKBED_IMAGES_FILE"] = (
+            str(images_file.resolve()) if images_file is not None else ""
+        )
     if debug:
         args = [*args, "--debug"]
-    try:
-        result = deploy.main(args, root / "terragrunt", run_dir=run_dir)
-    finally:
-        if run_dir is not None:
-            if previous_images is None:
-                os.environ.pop("ATTACKBED_IMAGES_FILE", None)
-            else:
-                os.environ["ATTACKBED_IMAGES_FILE"] = previous_images
+    result = deploy.main(args, root / "terragrunt", run_dir=run_dir, env_override=env_override)
     if result:
-        raise RuntimeError(f"Terragrunt {args[1]} failed; see the run log")
+        log = run_dir / "logs" / f"{args[1]}.log" if run_dir is not None else "the run log"
+        raise AttackBedError(f"Terragrunt {args[1]} failed; see {log}")
 
 
-def make_parser():
+def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build images and manage AttackBed deployments.")
     commands = parser.add_subparsers(dest="action", required=True)
 
@@ -97,7 +101,7 @@ def make_parser():
     return parser
 
 
-def destroy(args, root, parser):
+def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParser) -> int:
     job = None
     directory = None
     if args.target.startswith("run-"):
@@ -138,7 +142,7 @@ def destroy(args, root, parser):
     return 0
 
 
-def main(argv=None, root=ROOT):
+def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
     parser = make_parser()
     args = parser.parse_args(argv)
 
@@ -237,5 +241,30 @@ def main(argv=None, root=ROOT):
     return 0
 
 
+def entrypoint(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
+    """CLI boundary: report operational failures, but preserve programming errors."""
+    arguments = sys.argv[1:] if argv is None else argv
+    debug = "--debug" in arguments
+    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="%(message)s")
+    try:
+        return main(argv, root)
+    except Exception as exc:
+        # OpenStack SDK errors are operational failures too, but avoid a hard import
+        # when users only need --help or the SDK is not installed.
+        try:
+            from openstack.exceptions import SDKException
+            sdk_error = isinstance(exc, SDKException)
+        except ImportError:
+            sdk_error = False
+        if not isinstance(exc, (AttackBedError, OSError, ValueError, yaml.YAMLError)) and not sdk_error:
+            raise
+        if debug:
+            report = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            print(redact(report), file=sys.stderr, end="")
+        else:
+            print(f"Error: {redact(str(exc))}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())
