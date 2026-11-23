@@ -113,6 +113,23 @@ def test_one_failed_terragrunt_copy_does_not_stop_other_copy(tmp_path: Path) -> 
     assert "1 deployment(s) succeeded, 1 failed" in log
 
 
+def test_missing_terragrunt_binary_fails_with_context(tmp_path: Path) -> None:
+    root = tmp_path / "terragrunt"
+    (root / "bootstrap").mkdir(parents=True)
+    (root / "bootstrap" / "terragrunt.hcl").touch()
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+    run_dir = tmp_path / "runs" / "run-test"
+
+    with patch.object(deploy.subprocess, "Popen", side_effect=FileNotFoundError("terragrunt")):
+        result = deploy.main(["demo", "plan", "--copies", "1"], root, run_dir=run_dir)
+
+    assert result == 1
+    log = (run_dir / "logs" / "plan.log").read_text()
+    assert "Terragrunt plan for lab-001/bootstrap" in log
+    assert "terragrunt" in log
+
+
 def test_cli_reports_expected_error_without_traceback(capsys, monkeypatch) -> None:
     monkeypatch.setenv("CR_GITLAB_ACCESS_TOKEN", "SECRET")
     error = CommandError(
