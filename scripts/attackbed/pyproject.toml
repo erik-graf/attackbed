@@ -39,3 +39,13 @@ source = ["src"]
 [tool.mypy]
 strict = true
 ignore_missing_imports = true
+
+[tool.isort]
+line_length = 110
+multi_line_output = 3
+include_trailing_comma = true
+known_first_party = ["attackbed"]
+src_paths = ["src", "tests"]
+
+[tool.deptry]
+known_first_party = ["attackbed"]
