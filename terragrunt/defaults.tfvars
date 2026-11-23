@@ -1,3 +1,8 @@
+# Tracked defaults for every Terragrunt unit: terragrunt/defaults.tfvars
+# Override locally in gitignored terragrunt/terraform.tfvars (same variable names).
+# CLI-selected images from runs/<run-id>/images.json take precedence at runtime.
+# default_flavor only applies to the small VM roles listed in root.hcl.
+
 default_flavor    = "d2-2"
 sshkey            = "testbed-key"
 floating_pool     = "Ext-Net"
