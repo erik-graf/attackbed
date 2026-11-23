@@ -1,71 +1,17 @@
-"""Build Packer images and manage AttackBed deployments."""
+"""Command-line entry point for the AttackBed Python API."""
 
 import argparse
-from datetime import datetime, timezone
-import json
 import logging
-import os
 from pathlib import Path
-import re
 import sys
 import traceback
-from typing import Any, Sequence
-from uuid import uuid4
+from typing import Sequence
 
 import yaml
 
-from . import deploy
+from . import api
 from .arguments import deployment_name, positive_int
 from .errors import AttackBedError, redact
-from .images import active_image, build_image, latest_images, required_recipes
-from .ssh import write_ssh_config
-
-ROOT = Path(__file__).resolve().parents[4]
-
-
-def connect() -> Any:
-    try:
-        import openstack
-    except ImportError as exc:
-        raise AttackBedError("OpenStack SDK is not installed; use uv to install CLI dependencies") from exc
-    return openstack.connect()
-
-
-def save_json(path: Path, value: object) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2) + "\n")
-    temp.replace(path)
-
-
-def resume_directory(runs: Path, requested: str) -> Path:
-    if requested == "latest":
-        jobs = sorted(path for path in runs.glob("run-*") if (path / "run.json").is_file())
-        if not jobs:
-            raise ValueError("No runs to resume")
-        return jobs[-1]
-    if not re.fullmatch(r"run-[A-Za-z0-9-]+", requested):
-        raise ValueError("Invalid run ID")
-    directory = runs / requested
-    if not (directory / "run.json").is_file():
-        raise ValueError(f"Unknown run: {requested}")
-    return directory
-
-def run_terragrunt(
-    root: Path, args: Sequence[str], run_dir: Path | None = None,
-    images_file: Path | None = None, debug: bool = False,
-) -> None:
-    # Pass the image selection to each subprocess, not via mutable global os.environ.
-    env_override = {}
-    if run_dir is not None:
-        env_override["ATTACKBED_IMAGES_FILE"] = (
-            str(images_file.resolve()) if images_file is not None else ""
-        )
-    if debug:
-        args = [*args, "--debug"]
-    result = deploy.main(args, root / "terragrunt", run_dir=run_dir, env_override=env_override)
-    if result:
-        log = run_dir / "logs" / f"{args[1]}.log" if run_dir is not None else "the run log"
-        raise AttackBedError(f"Terragrunt {args[1]} failed; see {log}")
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -73,11 +19,11 @@ def make_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="action", required=True)
 
     build = commands.add_parser("build", help="Build scenario images without deploying")
-    build.add_argument("scenario", help="Scenario from config/scenarios.yaml")
+    build.add_argument("scenario", help="Scenario from config/config.yaml")
     build.add_argument("--debug", action="store_true", help="Stream Packer diagnostic output")
 
     deploy_cmd = commands.add_parser("deploy", help="Deploy scenario using existing or newly built images")
-    deploy_cmd.add_argument("scenario", help="Scenario from config/scenarios.yaml")
+    deploy_cmd.add_argument("scenario", help="Scenario from config/config.yaml")
     source = deploy_cmd.add_mutually_exclusive_group()
     source.add_argument("--build", action="store_true", help="Build images before deploying")
     source.add_argument("--images", type=Path, metavar="FILE", help="Use image selection from JSON file")
@@ -127,165 +73,43 @@ def make_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParser) -> int:
-    job = None
-    directory = None
-    if args.target.startswith("run-"):
-        if args.copies is not None or args.prefix != "lab":
-            parser.error("RUN_ID cannot be combined with --copies or --prefix")
-        directory = resume_directory(root / "runs", args.target)
-        job = json.loads((directory / "run.json").read_text())
-        if job["action"] == "build":
-            parser.error("Build-only runs have no infrastructure to destroy")
-        if job.get("destroyed"):
-            if args.delete_states and not job.get("states_deleted"):
-                for variable in (
-                    "GITLAB_STATE_REPOSITORY", "CR_GITLAB_ACCESS_TOKEN",
-                    "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME",
-                ):
-                    if not os.environ.get(variable):
-                        parser.error(f"{variable} is required for --delete-states")
-                for name in job["deployments"]:
-                    deploy.delete_deployment_states(name, job["units"])
-                job["states_deleted"] = True
-                save_json(directory / "run.json", job)
-                print(f"Deleted empty Terraform states: {directory}")
-            else:
-                print(f"Already destroyed: {directory}")
-            return 0
-        scenario = job["scenario"]
-        selection = []
-        for name in job["deployments"]:
-            selection += ["--deployment", name]
-        parallel_copies = args.parallel_copies or job["parallel_copies"]
-        tofu_parallelism = (
-            args.tofu_parallelism if args.tofu_parallelism is not None else job["tofu_parallelism"]
-        )
-    else:
-        if args.copies is None:
-            parser.error("Destroying a scenario requires --copies")
-        scenario = args.target
-        selection = ["--copies", str(args.copies), "--prefix", args.prefix]
-        parallel_copies = args.parallel_copies or 4
-        tofu_parallelism = args.tofu_parallelism
 
-    command = [scenario, "destroy", "--parallel-copies", str(parallel_copies), *selection]
-    if tofu_parallelism is not None:
-        command += ["--tofu-parallelism", str(tofu_parallelism)]
-    if args.delete_states:
-        command.append("--delete-states")
-    images_file = directory / "images.json" if directory is not None else None
-    if images_file is not None and not images_file.is_file():
-        images_file = None
-    run_terragrunt(root, command, directory, images_file, args.debug)
-    if job is not None:
-        job["deployed"] = False
-        job["destroyed"] = True
-        job["states_deleted"] = args.delete_states
-        save_json(directory / "run.json", job)
-    return 0
-
-
-def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
+def main(argv: Sequence[str] | None = None, root: Path = api.ROOT) -> int:
+    """Parse arguments once, then call the same API available to Python callers."""
     parser = make_parser()
     args = parser.parse_args(argv)
 
-    if args.action == "destroy":
-        return destroy(args, root, parser)
-
-    runs = root / "runs"
-    if args.action == "resume":
-        directory = resume_directory(runs, args.run_id)
-        job = json.loads((directory / "run.json").read_text())
-        if job.get("destroyed"):
-            parser.error("This run was destroyed; start a new run")
-    else:
-        scenarios = yaml.safe_load((root / "config/scenarios.yaml").read_text())
-        if args.scenario not in scenarios:
-            parser.error(f"Unknown scenario: {args.scenario}")
-        units = list(dict.fromkeys(scenarios[args.scenario]))
-        if "bootstrap" not in units:
-            parser.error("Scenario must include bootstrap")
-        run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
-        directory = runs / run_id
-        directory.mkdir(parents=True, mode=0o700)
-        build_images = args.action == "build" or args.build
-        image_source = args.images if args.action == "deploy" else None
-        job = {
-            "action": args.action,
-            "scenario": args.scenario,
-            "units": units,
-            "deployments": ([f"{args.prefix}-{n:03d}" for n in range(1, args.copies + 1)]
-                            if args.action == "deploy" else []),
-            "mode": "build" if build_images else "file" if image_source else "latest",
-            "source_images": str(image_source.expanduser().resolve()) if image_source else None,
-            "parallel_copies": args.parallel_copies if args.action == "deploy" else None,
-            "tofu_parallelism": args.tofu_parallelism if args.action == "deploy" else None,
-            "deployed": False,
-            "complete": False,
-        }
-        save_json(directory / "run.json", job)
-
-    if job["complete"]:
-        print(f"Already complete: {directory}")
-        return 0
-    print(f"Run: {directory}", flush=True)
-    conn = connect()
-    recipes = required_recipes(root, job["units"])
-    images_file = directory / "images.json"
-    images = json.loads(images_file.read_text()) if images_file.exists() else {}
-    if job["mode"] == "build":
-        packer_logs = directory / "logs" / "packer"
-        packer_logs.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for role, recipe in recipes.items():
-            if role in images:
-                active_image(conn, images[role]["id"])
-                continue
-            print(f"Building {role} ({recipe})", flush=True)
-            images[role] = build_image(conn, root, recipe, packer_logs / f"{recipe}.log", debug=args.debug)
-            save_json(images_file, images)
-    elif not images_file.exists():
-        if job["mode"] == "latest":
-            images = latest_images(conn, root, recipes)
-        else:
-            source_file = Path(job["source_images"])
-            images = json.loads(source_file.read_text())
-        images = {role: active_image(conn, images[role]["id"]) for role in recipes}
-        save_json(images_file, images)
-
-    if job["action"] == "build":
-        job["complete"] = True
-        save_json(directory / "run.json", job)
-        print(f"Images: {images_file}")
-        return 0
-
-    if not job["deployed"]:
-        command = [job["scenario"], "apply", "--parallel-copies", str(job["parallel_copies"])]
-        for name in job["deployments"]:
-            command += ["--deployment", name]
-        if job["tofu_parallelism"] is not None:
-            command += ["--tofu-parallelism", str(job["tofu_parallelism"])]
-        run_terragrunt(root, command, directory, images_file, args.debug)
-        job["deployed"] = True
-        save_json(directory / "run.json", job)
-
-    write_ssh_config(conn, job["deployments"], directory / "ssh_config")
-    job["complete"] = True
-    save_json(directory / "run.json", job)
-    print(f"SSH: ssh -F {directory / 'ssh_config'} {job['deployments'][0]}-mgmt")
+    if args.action == "build":
+        api.build(args.scenario, root=root, debug=args.debug)
+    elif args.action == "deploy":
+        api.deploy(
+            args.scenario, copies=args.copies, prefix=args.prefix,
+            parallel_copies=args.parallel_copies, tofu_parallelism=args.tofu_parallelism,
+            build_images=args.build, images=args.images, root=root, debug=args.debug,
+        )
+    elif args.action == "resume":
+        api.resume(args.run_id, root=root, debug=args.debug)
+    elif args.action == "destroy":
+        if args.target.startswith("run-") and (args.copies is not None or args.prefix != "lab"):
+            parser.error("RUN_ID cannot be combined with --copies or --prefix")
+        if not args.target.startswith("run-") and args.copies is None:
+            parser.error("Destroying a scenario requires --copies")
+        api.destroy(
+            args.target, copies=args.copies, prefix=args.prefix,
+            parallel_copies=args.parallel_copies, tofu_parallelism=args.tofu_parallelism,
+            delete_states=args.delete_states, root=root, debug=args.debug,
+        )
     return 0
 
 
-def entrypoint(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
-    """CLI boundary: report operational failures, but preserve programming errors."""
+def entrypoint(argv: Sequence[str] | None = None, root: Path = api.ROOT) -> int:
+    """Convert expected operational failures to concise CLI errors."""
     arguments = sys.argv[1:] if argv is None else argv
     debug = "--debug" in arguments
     logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="%(message)s")
     try:
         return main(argv, root)
     except Exception as exc:
-        # OpenStack SDK errors are operational failures too, but avoid a hard import
-        # when users only need --help or the SDK is not installed.
         try:
             from openstack.exceptions import SDKException
             sdk_error = isinstance(exc, SDKException)

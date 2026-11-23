@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from attackbed import cli, deploy, images
+from attackbed import api, cli, deploy, images
 from attackbed.errors import AttackBedError, CommandError
 
 
@@ -86,7 +86,7 @@ def test_one_failed_terragrunt_copy_does_not_stop_other_copy(tmp_path: Path) -> 
     (root / "bootstrap").mkdir(parents=True)
     (root / "bootstrap" / "terragrunt.hcl").touch()
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+    (tmp_path / "config" / "config.yaml").write_text("scenarios:\n  demo: [bootstrap]\nimage_recipes: {}\n")
     run_dir = tmp_path / "runs" / "run-test"
     seen = []
 
@@ -100,9 +100,9 @@ def test_one_failed_terragrunt_copy_does_not_stop_other_copy(tmp_path: Path) -> 
         return process
 
     with patch.object(deploy.subprocess, "Popen", side_effect=launch):
-        result = deploy.main(
-            ["demo", "apply", "--copies", "2", "--parallel-copies", "2"],
-            root, run_dir=run_dir,
+        result = deploy.run_deployments(
+            root, ["bootstrap"], ["lab-001", "lab-002"], "apply",
+            parallel_copies=2, run_dir=run_dir,
         )
 
     assert result == 1
@@ -118,11 +118,13 @@ def test_missing_terragrunt_binary_fails_with_context(tmp_path: Path) -> None:
     (root / "bootstrap").mkdir(parents=True)
     (root / "bootstrap" / "terragrunt.hcl").touch()
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+    (tmp_path / "config" / "config.yaml").write_text("scenarios:\n  demo: [bootstrap]\nimage_recipes: {}\n")
     run_dir = tmp_path / "runs" / "run-test"
 
     with patch.object(deploy.subprocess, "Popen", side_effect=FileNotFoundError("terragrunt")):
-        result = deploy.main(["demo", "plan", "--copies", "1"], root, run_dir=run_dir)
+        result = deploy.run_deployments(
+            root, ["bootstrap"], ["lab-001"], "plan", run_dir=run_dir,
+        )
 
     assert result == 1
     log = (run_dir / "logs" / "plan.log").read_text()
@@ -131,15 +133,15 @@ def test_missing_terragrunt_binary_fails_with_context(tmp_path: Path) -> None:
 
 
 def test_terragrunt_parser_checks_delete_states_action_and_positive_counts(tmp_path: Path) -> None:
-    root = tmp_path / "terragrunt"
+    parser = cli.make_parser()
     for arguments in (
-        ["demo", "apply", "--copies", "0"],
-        ["demo", "destroy", "--copies", "-1"],
-        ["demo", "apply", "--deployment", "INVALID"],
-        ["demo", "apply", "--copies", "1", "--delete-states"],
+        ["deploy", "demo", "--copies", "0"],
+        ["destroy", "demo", "--copies", "-1"],
+        ["deploy", "demo", "--prefix", "INVALID"],
+        ["deploy", "demo", "--copies", "1", "--delete-states"],
     ):
         with pytest.raises(SystemExit) as error:
-            deploy.main(arguments, root)
+            parser.parse_args(arguments)
         assert error.value.code == 2
 
 
@@ -148,7 +150,7 @@ def test_destroy_does_not_require_cleanup_credentials_without_switch(tmp_path: P
     (root / "bootstrap").mkdir(parents=True)
     (root / "bootstrap" / "terragrunt.hcl").touch()
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+    (tmp_path / "config" / "config.yaml").write_text("scenarios:\n  demo: [bootstrap]\nimage_recipes: {}\n")
     run_dir = tmp_path / "runs" / "run-test"
     env_override = {
         "GITLAB_STATE_REPOSITORY": "", "CR_GITLAB_ACCESS_TOKEN": "",
@@ -158,17 +160,16 @@ def test_destroy_does_not_require_cleanup_credentials_without_switch(tmp_path: P
         patch.object(deploy.TerragruntDeployment, "run_unit"),
         patch.object(deploy, "delete_deployment_states") as delete,
     ):
-        assert deploy.main(
-            ["demo", "destroy", "--copies", "1"], root,
+        assert deploy.run_deployments(
+            root, ["bootstrap"], ["lab-001"], "destroy",
             run_dir=run_dir, env_override=env_override,
         ) == 0
     delete.assert_not_called()
-    with pytest.raises(SystemExit) as error:
-        deploy.main(
-            ["demo", "destroy", "--copies", "1", "--delete-states"], root,
-            run_dir=run_dir, env_override=env_override,
+    with pytest.raises(ValueError, match="required"):
+        deploy.run_deployments(
+            root, ["bootstrap"], ["lab-001"], "destroy",
+            run_dir=run_dir, env_override=env_override, delete_states=True,
         )
-    assert error.value.code == 2
 
 
 def test_cli_reports_expected_error_without_traceback(capsys, monkeypatch) -> None:
@@ -206,7 +207,10 @@ def test_image_selection_is_passed_to_terragrunt_without_mutating_environment(
 ) -> None:
     monkeypatch.setenv("ATTACKBED_IMAGES_FILE", "previous-value")
     images_file = tmp_path / "images.json"
-    with patch.object(cli.deploy, "main", return_value=0) as invoke:
-        cli.run_terragrunt(tmp_path, ["demo", "apply"], tmp_path / "run", images_file)
+    with patch.object(deploy, "run_deployments", return_value=0) as invoke:
+        api._run_terragrunt(
+            tmp_path, ["bootstrap"], ["lab-001"], "apply",
+            run_dir=tmp_path / "run", images_file=images_file,
+        )
     assert os.environ["ATTACKBED_IMAGES_FILE"] == "previous-value"
     assert invoke.call_args.kwargs["env_override"]["ATTACKBED_IMAGES_FILE"] == str(images_file.resolve())

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from attackbed import cli, deploy, images, ssh
+from attackbed import api, cli, deploy, images, ssh
 from attackbed.errors import AttackBedError, CommandError
 
 
@@ -33,13 +33,15 @@ class WorkflowTests(unittest.TestCase):
         (recipe / "default.json").write_text('{"image_name": "atb-corpdns"}')
         config = self.root / "config"
         config.mkdir()
-        (config / "image-recipes.yaml").write_text("inetfw_image: firewall\ncorpdns_image: corpdns\n")
+        (config / "config.yaml").write_text(
+            "scenarios:\n  core: [bootstrap]\nimage_recipes:\n"
+            "  inetfw_image: firewall\n  corpdns_image: corpdns\n"
+        )
         terragrunt = self.root / "terragrunt"
         (terragrunt / "bootstrap/module").mkdir(parents=True)
         (terragrunt / "bootstrap/terragrunt.hcl").touch()
         (terragrunt / "bootstrap/module/variables.tf").write_text(
             'variable "inetfw_image" {}\nvariable "corpdns_image" {}\nvariable "mgmt_image" {}\n')
-        (config / "scenarios.yaml").write_text("core: [bootstrap]\n")
         (self.root / "packer/defaults.json").write_text(
             '{"network": "build-net", "floating_ip_pool": "Ext-Net", "security_group": "default"}')
         self.images = [image("atb-firewall-1", "11111111-1111-1111-1111-111111111111", "2026-01-01"),
@@ -92,29 +94,32 @@ class WorkflowTests(unittest.TestCase):
             selections.append(kwargs["env_override"].get("ATTACKBED_IMAGES_FILE"))
             return 0
 
-        with patch.object(cli, "connect", return_value=self.conn), \
-             patch.object(cli, "build_image", side_effect=build), \
-             patch.object(deploy, "main", side_effect=run) as invoke, \
-             patch.object(cli, "write_ssh_config"):
+        with patch.object(api, "connect", return_value=self.conn), \
+             patch.object(api, "build_image", side_effect=build), \
+             patch.object(deploy, "run_deployments", side_effect=run) as invoke, \
+             patch.object(api, "write_ssh_config"):
             with self.assertRaisesRegex(RuntimeError, "build failed"):
                 cli.main(["deploy", "core", "--build", "--copies", "2", "--tofu-parallelism", "3"], self.root)
             self.assertEqual(cli.main(["resume"], self.root), 0)
             self.assertEqual(cli.main(["resume"], self.root), 0)
             call = invoke.call_args
         self.assertEqual(built, ["corpdns", "firewall", "firewall"])
-        self.assertEqual(call.args[0].count("--deployment"), 2)
-        self.assertIn("--tofu-parallelism", call.args[0])
+        self.assertEqual(call.args[2], ["lab-001", "lab-002"])
+        self.assertEqual(call.kwargs["tofu_parallelism"], 3)
         self.assertTrue(Path(selections[0]).is_absolute())
         directory = next((self.root / "runs").iterdir())
         self.assertEqual(call.kwargs["run_dir"], directory)
         self.assertTrue((directory / "logs/packer").is_dir())
         self.assertTrue(json.loads((directory / "run.json").read_text())["complete"])
         self.assertEqual(len(json.loads((directory / "images.json").read_text())), 2)
+        tfvars = (directory / "images.tfvars").read_text()
+        self.assertIn('corpdns_image = "atb-corpdns-1"', tfvars)
+        self.assertIn('inetfw_image = "atb-firewall-1"', tfvars)
 
     def test_latest_selection_is_saved_for_resume(self):
-        with patch.object(cli, "connect", return_value=self.conn), \
-             patch.object(cli, "write_ssh_config") as ssh_write, \
-             patch.object(deploy, "main", side_effect=[1, 0]):
+        with patch.object(api, "connect", return_value=self.conn), \
+             patch.object(api, "write_ssh_config") as ssh_write, \
+             patch.object(deploy, "run_deployments", side_effect=[1, 0]):
             with self.assertRaisesRegex(AttackBedError, "Terragrunt apply failed"):
                 cli.main(["deploy", "core"], self.root)
             self.images.append(image("atb-firewall-3", "44444444-4444-4444-4444-444444444444", "2026-04-01"))
@@ -125,15 +130,16 @@ class WorkflowTests(unittest.TestCase):
                          "atb-firewall-2")
 
     def test_destroy_uses_scenario_copies_and_prefix(self):
-        with patch.object(deploy, "main", return_value=0) as run, patch.object(cli, "connect") as connect:
+        with patch.object(deploy, "run_deployments", return_value=0) as run, \
+             patch.object(api, "connect") as connect:
             self.assertEqual(cli.main(["destroy", "core", "--copies", "3", "--prefix", "trial",
                                        "--parallel-copies", "2"], self.root), 0)
-        args = run.call_args.args[0]
-        self.assertEqual(args[:2], ["core", "destroy"])
-        self.assertEqual(args[-4:], ["--copies", "3", "--prefix", "trial"])
-        self.assertIn("--parallel-copies", args)
-        self.assertNotIn("--deployment", args)
-        self.assertIsNone(run.call_args.kwargs["run_dir"])
+        args = run.call_args.args
+        self.assertEqual(args[1], ["bootstrap"])
+        self.assertEqual(args[2], ["trial-001", "trial-002", "trial-003"])
+        self.assertEqual(args[3], "destroy")
+        self.assertEqual(run.call_args.kwargs["parallel_copies"], 2)
+        self.assertEqual(run.call_args.kwargs["run_dir"].parent, self.root / "runs")
         connect.assert_not_called()
 
     def test_destroy_run_id_uses_saved_deployments_and_updates_state(self):
@@ -143,9 +149,9 @@ class WorkflowTests(unittest.TestCase):
             selected_images.append(kwargs["env_override"].get("ATTACKBED_IMAGES_FILE"))
             return 0
 
-        with patch.object(cli, "connect", return_value=self.conn) as connect, \
-             patch.object(cli, "write_ssh_config"), \
-             patch.object(deploy, "main", side_effect=run) as invoke:
+        with patch.object(api, "connect", return_value=self.conn) as connect, \
+             patch.object(api, "write_ssh_config"), \
+             patch.object(deploy, "run_deployments", side_effect=run) as invoke:
             self.assertEqual(
                 cli.main(["deploy", "core", "--copies", "2", "--tofu-parallelism", "3"], self.root), 0,
             )
@@ -153,11 +159,11 @@ class WorkflowTests(unittest.TestCase):
             invoke.reset_mock()
             self.assertEqual(cli.main(["destroy", directory.name], self.root), 0)
             invoke.assert_called_once()
-            args = invoke.call_args.args[0]
-            self.assertEqual(args.count("--deployment"), 2)
-            self.assertIn("lab-001", args)
-            self.assertIn("lab-002", args)
-            self.assertIn("--tofu-parallelism", args)
+            args = invoke.call_args.args
+            self.assertEqual(args[1], ["bootstrap"])
+            self.assertEqual(args[2], ["lab-001", "lab-002"])
+            self.assertEqual(args[3], "destroy")
+            self.assertEqual(invoke.call_args.kwargs["tofu_parallelism"], 3)
             self.assertEqual(invoke.call_args.kwargs["run_dir"], directory)
             self.assertEqual(selected_images[-1], str((directory / "images.json").resolve()))
             invoke.reset_mock()
@@ -168,11 +174,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(job["destroyed"])
         self.assertFalse(job["deployed"])
         self.assertFalse(job["states_deleted"])
-        with self.assertRaises(SystemExit):
+        with self.assertRaisesRegex(ValueError, "destroyed"):
             cli.main(["resume", directory.name], self.root)
 
     def test_destroy_validates_copy_count_and_preserves_failed_runs(self):
-        with patch.object(deploy, "main") as run:
+        with patch.object(deploy, "run_deployments") as run:
             for args in (["destroy", "core"], ["destroy", "core", "--copies", "0"]):
                 with self.assertRaises(SystemExit):
                     cli.main(args, self.root)
@@ -182,8 +188,8 @@ class WorkflowTests(unittest.TestCase):
         directory.mkdir(parents=True)
         job = {"action": "deploy", "scenario": "core", "deployments": ["lab-001"],
                "parallel_copies": 2, "tofu_parallelism": None, "deployed": True}
-        cli.save_json(directory / "run.json", job)
-        with patch.object(deploy, "main", return_value=1):
+        api.save_json(directory / "run.json", job)
+        with patch.object(deploy, "run_deployments", return_value=1):
             with self.assertRaisesRegex(AttackBedError, "Terragrunt destroy failed"):
                 cli.main(["destroy", directory.name], self.root)
         self.assertEqual(json.loads((directory / "run.json").read_text()), job)
@@ -196,8 +202,12 @@ class WorkflowTests(unittest.TestCase):
             proc.wait.return_value = 0
             for _ in range(2):
                 with self.subTest(attempt=_):
-                    self.assertEqual(deploy.main(["core", "plan", "--copies", "1"],
-                                                 self.root / "terragrunt", run_dir=directory), 0)
+                    self.assertEqual(
+                        deploy.run_deployments(
+                            self.root / "terragrunt", ["bootstrap"], ["lab-001"], "plan",
+                            run_dir=directory,
+                        ), 0,
+                    )
         log = (directory / "logs/plan.log").read_text()
         self.assertEqual(log.count("[lab-001/bootstrap] created resource\n"), 2)
         self.assertEqual(log.count("--- plan "), 2)
@@ -211,10 +221,10 @@ class WorkflowTests(unittest.TestCase):
                 raise RuntimeError("Packer failed")
             return images.active_image(conn, next(item.id for item in self.images if recipe in item.name))
 
-        with patch.object(cli, "connect", return_value=self.conn), \
-             patch.object(cli, "build_image", side_effect=build), \
-             patch.object(deploy, "main") as infra, \
-             patch.object(cli, "write_ssh_config") as ssh:
+        with patch.object(api, "connect", return_value=self.conn), \
+             patch.object(api, "build_image", side_effect=build), \
+             patch.object(deploy, "run_deployments") as infra, \
+             patch.object(api, "write_ssh_config") as ssh:
             with self.assertRaisesRegex(RuntimeError, "Packer failed"):
                 cli.main(["build", "core"], self.root)
             directory = next((self.root / "runs").iterdir())
@@ -228,23 +238,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(job["deployed"])
         self.assertEqual(job["deployments"], [])
         self.assertEqual(len(json.loads((directory / "images.json").read_text())), 2)
-        with self.assertRaises(SystemExit):
+        with self.assertRaisesRegex(ValueError, "Build-only runs"):
             cli.main(["destroy", directory.name], self.root)
 
     def test_debug_forwarded_to_terragrunt(self):
-        with patch.object(cli, "connect", return_value=self.conn), \
-             patch.object(deploy, "main", return_value=0) as invoke, \
-             patch.object(cli, "write_ssh_config"):
+        with patch.object(api, "connect", return_value=self.conn), \
+             patch.object(deploy, "run_deployments", return_value=0) as invoke, \
+             patch.object(api, "write_ssh_config"):
             self.assertEqual(cli.main(["deploy", "core", "--debug"], self.root), 0)
-        self.assertIn("--debug", invoke.call_args.args[0])
+        self.assertTrue(invoke.call_args.kwargs["debug"])
 
     def test_backend_applies_without_yes(self):
         with patch.object(deploy.subprocess, "Popen") as popen:
             process = popen.return_value.__enter__.return_value
             process.stdout = []
             process.wait.return_value = 0
-            self.assertEqual(deploy.main(["core", "apply", "--copies", "1"],
-                                         self.root / "terragrunt"), 0)
+            self.assertEqual(
+                deploy.run_deployments(
+                    self.root / "terragrunt", ["bootstrap"], ["lab-001"], "apply",
+                ), 0,
+            )
         self.assertIn("-auto-approve", popen.call_args.args[0])
 
     def test_action_help(self):
@@ -330,7 +343,7 @@ class WorkflowTests(unittest.TestCase):
             "units": ["bootstrap"], "destroyed": True, "deployed": False,
             "parallel_copies": 2, "tofu_parallelism": None,
         }
-        cli.save_json(directory / "run.json", job)
+        api.save_json(directory / "run.json", job)
         credentials = {
             "GITLAB_STATE_REPOSITORY": "https://gitlab.example/api/v4/projects/123/terraform/state",
             "CR_GITLAB_ACCESS_TOKEN": "test-token",
@@ -338,7 +351,7 @@ class WorkflowTests(unittest.TestCase):
         }
         with patch.dict(os.environ, credentials), \
              patch.object(deploy, "delete_deployment_states") as cleanup, \
-             patch.object(deploy, "main") as invoke:
+             patch.object(deploy, "run_deployments") as invoke:
             self.assertEqual(cli.main(["destroy", directory.name, "--delete-states"], self.root), 0)
             cleanup.assert_called_once_with("lab-001", ["bootstrap"])
             self.assertEqual(cli.main(["destroy", directory.name, "--delete-states"], self.root), 0)
@@ -347,12 +360,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(json.loads((directory / "run.json").read_text())["states_deleted"])
 
     def test_delete_states_switch_is_forwarded_to_terragrunt(self):
-        with patch.object(deploy, "main", return_value=0) as invoke:
+        with patch.object(deploy, "run_deployments", return_value=0) as invoke:
             self.assertEqual(
                 cli.main(["destroy", "core", "--copies", "1", "--delete-states"], self.root),
                 0,
             )
-        self.assertIn("--delete-states", invoke.call_args.args[0])
+        self.assertTrue(invoke.call_args.kwargs["delete_states"])
 
 
 class SSHTests(unittest.TestCase):

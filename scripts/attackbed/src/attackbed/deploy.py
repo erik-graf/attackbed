@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run independent AttackBed deployments using the existing Terragrunt units."""
 
-import argparse
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,30 +17,10 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-import yaml
-
 from .arguments import deployment_name, positive_int
 from .errors import AttackBedError, CommandError, redact
 
-ROOT = Path(__file__).resolve().parents[4] / "terragrunt"
 LOGGER = logging.getLogger(__name__)
-
-
-def scenario_units(root: Path, scenario: str) -> list[str]:
-    with (root.parent / "config/scenarios.yaml").open() as stream:
-        scenarios: dict[str, list[str]] = yaml.safe_load(stream)
-    if scenario not in scenarios:
-        raise ValueError(f"Unknown scenario: {scenario}")
-
-    units = list(dict.fromkeys(scenarios[scenario]))
-    if "bootstrap" not in units:
-        raise ValueError(f"Scenario {scenario} must include bootstrap")
-    units.remove("bootstrap")
-    units.insert(0, "bootstrap")
-    for unit in units:
-        if not (root / unit / "terragrunt.hcl").is_file():
-            raise ValueError(f"Unknown Terragrunt unit: {unit}")
-    return units
 
 
 class TerragruntDeployment:
@@ -169,77 +148,71 @@ def delete_deployment_states(
 
 
 
-def main(
-    argv: Sequence[str] | None = None, root: Path = ROOT, run_dir: Path | None = None,
+
+def run_deployments(
+    root: Path,
+    units: Sequence[str],
+    names: Sequence[str],
+    action: str,
+    *,
+    run_dir: Path | None = None,
+    parallel_copies: int = 4,
+    tofu_parallelism: int | None = None,
+    delete_states: bool = False,
+    debug: bool = False,
     env_override: Mapping[str, str] | None = None,
 ) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("scenario", help="Scenario from config/scenarios.yaml")
-    parser.add_argument("action", choices=("plan", "apply", "destroy"))
-    selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--copies", type=positive_int, help="Select PREFIX-001 through PREFIX-N")
-    selection.add_argument(
-        "--deployment", type=deployment_name, action="append", help="Deployment ID (repeatable)"
-    )
-    parser.add_argument("--prefix", type=deployment_name, default="lab", help="Prefix for --copies")
-    parser.add_argument(
-        "--parallel-copies", type=positive_int, default=4, help="Concurrent deployments"
-    )
-    parser.add_argument("--tofu-parallelism", type=positive_int, help="OpenTofu operations per unit")
-    parser.add_argument("--debug", action="store_true", help="Stream full Terragrunt output")
-    parser.add_argument(
-        "--delete-states", action="store_true",
-        help="Delete empty GitLab states after successful destroy (destroy only)",
-    )
-    args = parser.parse_args(argv)
-
-    if args.delete_states and args.action != "destroy":
-        parser.error("--delete-states is only valid for destroy")
+    """Orchestrate the specified units without parsing CLI arguments."""
+    if action not in ("plan", "apply", "destroy"):
+        raise ValueError(f"Unknown Terragrunt action: {action}")
+    if not names or any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in names):
+        raise ValueError("Deployment IDs must contain lowercase letters, digits or hyphens")
+    if parallel_copies < 1 or (tofu_parallelism is not None and tofu_parallelism < 1):
+        raise ValueError("Parallelism must be positive")
+    if delete_states and action != "destroy":
+        raise ValueError("State cleanup is only available for destroy")
+    if not units or any(not (root / unit / "terragrunt.hcl").is_file() for unit in units):
+        raise ValueError("Terragrunt units must exist and contain terragrunt.hcl")
 
     env = {**os.environ, **(env_override or {})}
     for variable in ("TG_DOWNLOAD_DIR", "TF_DATA_DIR"):
         if env.get(variable):
-            parser.error(f"Unset {variable} to preserve cache isolation")
-
-    names = args.deployment or [
-        f"{args.prefix}-{index:03d}" for index in range(1, args.copies + 1)
-    ]
-    names = list(dict.fromkeys(names))
-    units = scenario_units(root, args.scenario)
-
-    if args.action == "destroy" and args.delete_states:
-        for variable in ("GITLAB_STATE_REPOSITORY", "CR_GITLAB_ACCESS_TOKEN",
-                         "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME"):
+            raise ValueError(f"Unset {variable} to preserve cache isolation")
+    if delete_states:
+        for variable in (
+            "GITLAB_STATE_REPOSITORY", "CR_GITLAB_ACCESS_TOKEN",
+            "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME",
+        ):
             if not env.get(variable):
-                parser.error(f"{variable} is required to delete GitLab states after destroy")
+                raise ValueError(f"{variable} is required for --delete-states")
 
     if run_dir is None:
         run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
         run_dir = root.parent / "runs" / run_id
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    log_path = log_dir / f"{args.action}.log"
+    log_path = log_dir / f"{action}.log"
     log_path.touch(mode=0o600, exist_ok=True)
     log_path.chmod(0o600)
 
-    handlers = _configure_logging(log_path, args.debug)
+    handlers = _configure_logging(log_path, debug)
     try:
-        LOGGER.info("--- %s %s ---", args.action, datetime.now(timezone.utc).isoformat())
+        LOGGER.info("--- %s %s ---", action, datetime.now(timezone.utc).isoformat())
 
         def worker(name: str) -> tuple[str, AttackBedError | None]:
             deployment = TerragruntDeployment(
-                root, name, units, tofu_parallelism=args.tofu_parallelism,
-                log_path=log_path, debug=args.debug, env=env, delete_states=args.delete_states,
+                root, name, list(units), tofu_parallelism=tofu_parallelism,
+                log_path=log_path, debug=debug, env=env, delete_states=delete_states,
             )
             try:
-                deployment.run(args.action)
+                deployment.run(action)
             except AttackBedError as exc:
                 LOGGER.error("[%s] FAILED: %s", name, redact(str(exc), env))
                 return name, exc
             return name, None
 
-        with ThreadPoolExecutor(max_workers=args.parallel_copies) as executor:
-            results = list(executor.map(worker, names))
+        with ThreadPoolExecutor(max_workers=parallel_copies) as executor:
+            results = list(executor.map(worker, dict.fromkeys(names)))
         failures = [name for name, error in results if error is not None]
         LOGGER.info("%d deployment(s) succeeded, %d failed", len(results) - len(failures), len(failures))
     finally:
@@ -249,11 +222,3 @@ def main(
 
     print(f"Log: {log_path}", flush=True)
     return int(bool(failures))
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (AttackBedError, OSError, ValueError, yaml.YAMLError) as exc:
-        print(f"Error: {redact(str(exc))}", file=sys.stderr)
-        sys.exit(1)

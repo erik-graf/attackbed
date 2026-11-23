@@ -133,7 +133,9 @@ class LoggingTests(unittest.TestCase):
             (root / "bootstrap").mkdir(parents=True)
             (root / "bootstrap/terragrunt.hcl").touch()
             (root.parent / "config").mkdir()
-            (root.parent / "config/scenarios.yaml").write_text("demo: [bootstrap]\n")
+            (root.parent / "config/config.yaml").write_text(
+                "scenarios:\n  demo: [bootstrap]\nimage_recipes: {}\n"
+            )
             run_dir = root.parent / "runs" / "run-test"
 
             with mock.patch.dict(os.environ, {"CR_GITLAB_ACCESS_TOKEN": "SECRET"}), \
@@ -142,7 +144,7 @@ class LoggingTests(unittest.TestCase):
                 process.stdout = ["SECRET\n", "Error: failure\n"]
                 process.wait.return_value = 1
                 with redirect_stderr(StringIO()) as err, redirect_stdout(StringIO()):
-                    result = deploy.main(["demo", "plan", "--copies", "1"], root, run_dir)
+                    result = deploy.run_deployments(root, ["bootstrap"], ["lab-001"], "plan", run_dir=run_dir)
             log = (run_dir / "logs/plan.log").read_text()
 
         self.assertEqual(result, 1)
@@ -156,7 +158,7 @@ class LoggingTests(unittest.TestCase):
             root.mkdir()
             config = root.parent / "config"
             config.mkdir()
-            (config / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+            (config / "config.yaml").write_text("scenarios:\n  demo: [bootstrap]\nimage_recipes: {}\n")
             (root / "bootstrap").mkdir()
             (root / "bootstrap/terragrunt.hcl").touch()
             run_dir = root.parent / "runs" / "run-test"
@@ -165,8 +167,10 @@ class LoggingTests(unittest.TestCase):
                 process.stdout = ["current run\n"]
                 process.wait.return_value = 0
                 with redirect_stdout(StringIO()):
-                    result = deploy.main(["demo", "plan", "--copies", "1"], root, run_dir)
-                    result = max(result, deploy.main(["demo", "plan", "--copies", "1"], root, run_dir))
+                    result = deploy.run_deployments(root, ["bootstrap"], ["lab-001"], "plan", run_dir=run_dir)
+                    result = max(result, deploy.run_deployments(
+                        root, ["bootstrap"], ["lab-001"], "plan", run_dir=run_dir,
+                    ))
             log = (run_dir / "logs/plan.log").read_text()
         self.assertEqual(result, 0)
         self.assertEqual(log.count("[lab-001/bootstrap] current run\n"), 2)
