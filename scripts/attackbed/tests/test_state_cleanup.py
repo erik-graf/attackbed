@@ -43,6 +43,13 @@ class StateCleanupTests(unittest.TestCase):
         self.assertEqual(calls, ["videoserver"])
         delete.assert_not_called()
 
+    def test_normal_destroy_keeps_states(self):
+        with mock.patch.object(deploy.TerragruntDeployment, "run_unit"), \
+             mock.patch.object(deploy, "delete_deployment_states") as delete:
+            deployment = deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"])
+            deployment.run("destroy")
+        delete.assert_not_called()
+
     def test_cleanup_only_after_every_destroy(self):
         calls = []
 
@@ -52,7 +59,7 @@ class StateCleanupTests(unittest.TestCase):
         with mock.patch.object(deploy.TerragruntDeployment, "run_unit", runner), \
              mock.patch.object(deploy, "delete_deployment_states") as delete:
             deployment = deploy.TerragruntDeployment(
-                Path("/tmp"), "lab-001", ["bootstrap", "videoserver"]
+                Path("/tmp"), "lab-001", ["bootstrap", "videoserver"], delete_states=True
             )
             deployment.run("destroy")
         self.assertEqual(calls, ["videoserver", "bootstrap"])
@@ -112,7 +119,9 @@ class StateCleanupTests(unittest.TestCase):
     def test_cleanup_failure_reports_error(self):
         with mock.patch.object(deploy.TerragruntDeployment, "run_unit"), \
              mock.patch.object(deploy, "delete_deployment_states", side_effect=RuntimeError("not empty")):
-            deployment = deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"])
+            deployment = deploy.TerragruntDeployment(
+                Path("/tmp"), "lab-001", ["bootstrap"], delete_states=True
+            )
             with self.assertRaisesRegex(AttackBedError, "state cleanup failed"):
                 deployment.run("destroy")
 

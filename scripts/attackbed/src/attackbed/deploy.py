@@ -20,6 +20,7 @@ from uuid import uuid4
 
 import yaml
 
+from .arguments import deployment_name, positive_int
 from .errors import AttackBedError, CommandError, redact
 
 ROOT = Path(__file__).resolve().parents[4] / "terragrunt"
@@ -50,6 +51,7 @@ class TerragruntDeployment:
         self, root: Path, name: str, units: list[str], *,
         tofu_parallelism: int | None = None, log_path: Path | None = None,
         debug: bool = False, env: Mapping[str, str] | None = None,
+        delete_states: bool = False,
     ) -> None:
         self.root = root
         self.name = name
@@ -57,6 +59,7 @@ class TerragruntDeployment:
         self.tofu_parallelism = tofu_parallelism
         self.log_path = log_path
         self.debug = debug
+        self.delete_states = delete_states
         self.env = dict(os.environ if env is None else env)
 
     def run_unit(self, unit: str, action: str) -> None:
@@ -103,7 +106,7 @@ class TerragruntDeployment:
         order = reversed(self.units) if action == "destroy" else iter(self.units)
         for unit in order:
             self.run_unit(unit, action)
-        if action == "destroy":
+        if action == "destroy" and self.delete_states:
             try:
                 delete_deployment_states(self.name, self.units, env=self.env)
             except (OSError, ValueError, RuntimeError, TypeError) as exc:
@@ -174,20 +177,24 @@ def main(
     parser.add_argument("scenario", help="Scenario from config/scenarios.yaml")
     parser.add_argument("action", choices=("plan", "apply", "destroy"))
     selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--copies", type=int, help="Select PREFIX-001 through PREFIX-N")
-    selection.add_argument("--deployment", action="append", help="Deployment ID (repeatable)")
-    parser.add_argument("--prefix", default="lab", help="Prefix for --copies")
-    parser.add_argument("--parallel-copies", type=int, default=4, help="Concurrent deployments")
-    parser.add_argument("--tofu-parallelism", type=int, help="OpenTofu operations per unit")
+    selection.add_argument("--copies", type=positive_int, help="Select PREFIX-001 through PREFIX-N")
+    selection.add_argument(
+        "--deployment", type=deployment_name, action="append", help="Deployment ID (repeatable)"
+    )
+    parser.add_argument("--prefix", type=deployment_name, default="lab", help="Prefix for --copies")
+    parser.add_argument(
+        "--parallel-copies", type=positive_int, default=4, help="Concurrent deployments"
+    )
+    parser.add_argument("--tofu-parallelism", type=positive_int, help="OpenTofu operations per unit")
     parser.add_argument("--debug", action="store_true", help="Stream full Terragrunt output")
+    parser.add_argument(
+        "--delete-states", action="store_true",
+        help="Delete empty GitLab states after successful destroy (destroy only)",
+    )
     args = parser.parse_args(argv)
 
-    if args.copies is not None and args.copies < 1:
-        parser.error("--copies must be positive")
-    if args.parallel_copies < 1:
-        parser.error("--parallel-copies must be positive")
-    if args.tofu_parallelism is not None and args.tofu_parallelism < 1:
-        parser.error("--tofu-parallelism must be positive")
+    if args.delete_states and args.action != "destroy":
+        parser.error("--delete-states is only valid for destroy")
 
     env = {**os.environ, **(env_override or {})}
     for variable in ("TG_DOWNLOAD_DIR", "TF_DATA_DIR"):
@@ -197,12 +204,10 @@ def main(
     names = args.deployment or [
         f"{args.prefix}-{index:03d}" for index in range(1, args.copies + 1)
     ]
-    if any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in names):
-        parser.error("Deployment IDs must be lowercase letters, digits or hyphens")
     names = list(dict.fromkeys(names))
     units = scenario_units(root, args.scenario)
 
-    if args.action == "destroy":
+    if args.action == "destroy" and args.delete_states:
         for variable in ("GITLAB_STATE_REPOSITORY", "CR_GITLAB_ACCESS_TOKEN",
                          "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME"):
             if not env.get(variable):
@@ -224,7 +229,7 @@ def main(
         def worker(name: str) -> tuple[str, AttackBedError | None]:
             deployment = TerragruntDeployment(
                 root, name, units, tofu_parallelism=args.tofu_parallelism,
-                log_path=log_path, debug=args.debug, env=env,
+                log_path=log_path, debug=args.debug, env=env, delete_states=args.delete_states,
             )
             try:
                 deployment.run(args.action)

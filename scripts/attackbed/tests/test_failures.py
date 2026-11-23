@@ -130,6 +130,47 @@ def test_missing_terragrunt_binary_fails_with_context(tmp_path: Path) -> None:
     assert "terragrunt" in log
 
 
+def test_terragrunt_parser_checks_delete_states_action_and_positive_counts(tmp_path: Path) -> None:
+    root = tmp_path / "terragrunt"
+    for arguments in (
+        ["demo", "apply", "--copies", "0"],
+        ["demo", "destroy", "--copies", "-1"],
+        ["demo", "apply", "--deployment", "INVALID"],
+        ["demo", "apply", "--copies", "1", "--delete-states"],
+    ):
+        with pytest.raises(SystemExit) as error:
+            deploy.main(arguments, root)
+        assert error.value.code == 2
+
+
+def test_destroy_does_not_require_cleanup_credentials_without_switch(tmp_path: Path) -> None:
+    root = tmp_path / "terragrunt"
+    (root / "bootstrap").mkdir(parents=True)
+    (root / "bootstrap" / "terragrunt.hcl").touch()
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "scenarios.yaml").write_text("demo: [bootstrap]\n")
+    run_dir = tmp_path / "runs" / "run-test"
+    env_override = {
+        "GITLAB_STATE_REPOSITORY": "", "CR_GITLAB_ACCESS_TOKEN": "",
+        "OS_PROJECT_NAME": "", "OS_USER_DOMAIN_NAME": "",
+    }
+    with (
+        patch.object(deploy.TerragruntDeployment, "run_unit"),
+        patch.object(deploy, "delete_deployment_states") as delete,
+    ):
+        assert deploy.main(
+            ["demo", "destroy", "--copies", "1"], root,
+            run_dir=run_dir, env_override=env_override,
+        ) == 0
+    delete.assert_not_called()
+    with pytest.raises(SystemExit) as error:
+        deploy.main(
+            ["demo", "destroy", "--copies", "1", "--delete-states"], root,
+            run_dir=run_dir, env_override=env_override,
+        )
+    assert error.value.code == 2
+
+
 def test_cli_reports_expected_error_without_traceback(capsys, monkeypatch) -> None:
     monkeypatch.setenv("CR_GITLAB_ACCESS_TOKEN", "SECRET")
     error = CommandError(

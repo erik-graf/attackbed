@@ -7,7 +7,9 @@ locals {
   fw_userdata_file    = var.fw_userdata == null ? "${path.module}/scripts/firewallinit.yml" : var.fw_userdata
   mgmt_userdata_file    = var.mgmt_userdata == null ? "${path.module}/scripts/mgmtinit.yml" : var.mgmt_userdata
   ext_dnsserver_userdata_file = var.corpdns_userdata == null ? "${path.module}/scripts/corpdns.yml" : var.corpdns_userdata
-  # shortcut: numeric suffixes must be unique across deployments, regardless of prefix.
+  # OVH's automatically allocated Neutron segmentation range limited our network count.
+  # Explicit vRack VLAN IDs (five per deployment) allow more isolated copies.
+  # Numeric suffixes must be unique in the same vRack, regardless of prefix.
   vlan_base = 1000 + (tonumber(regex("[0-9]{3}$", var.deployment_id)) - 1) * 5
 }
 
@@ -30,7 +32,7 @@ resource "terraform_data" "router_gateway" {
   }
 
   provisioner "local-exec" {
-    command = "python3 \"${path.module}/scripts/router_gateway.py\" attach"
+    command = "uv run --package attackbed-cli python \"${path.module}/../scripts/router_gateway.py\" attach"
     environment = {
       ROUTER_ID  = self.triggers_replace.router_id
       NETWORK_ID = self.triggers_replace.network_id
@@ -39,7 +41,7 @@ resource "terraform_data" "router_gateway" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "python3 \"${path.module}/scripts/router_gateway.py\" detach"
+    command = "uv run --package attackbed-cli python \"${path.module}/../scripts/router_gateway.py\" detach"
     environment = {
       ROUTER_ID  = self.triggers_replace.router_id
       NETWORK_ID = self.triggers_replace.network_id

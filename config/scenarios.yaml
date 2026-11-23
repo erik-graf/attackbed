@@ -1,4 +1,15 @@
 # Scenario name -> ordered Terragrunt unit directories.
+# 'all' is primarily for building every required Packer image.
+all:
+  - bootstrap
+  - attacker
+  - client
+  - docker
+  - lanturtle
+  - logging
+  - repository
+  - videoserver
+  - wazuh
 core:
   - bootstrap
 attack:

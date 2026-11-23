@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -14,6 +15,7 @@ from uuid import uuid4
 import yaml
 
 from . import deploy
+from .arguments import deployment_name, positive_int
 from .errors import AttackBedError, redact
 from .images import active_image, build_image, latest_images, required_recipes
 from .ssh import write_ssh_config
@@ -80,15 +82,19 @@ def make_parser() -> argparse.ArgumentParser:
     source.add_argument("--build", action="store_true", help="Build images before deploying")
     source.add_argument("--images", type=Path, metavar="FILE", help="Use image selection from JSON file")
     deploy_cmd.add_argument(
-        "--copies", type=int, default=1, metavar="N",
+        "--copies", type=positive_int, default=1, metavar="N",
         help="Deploy PREFIX-001 through PREFIX-N (default: 1)",
     )
-    deploy_cmd.add_argument("--prefix", default="lab", help="Deployment name prefix (default: lab)")
     deploy_cmd.add_argument(
-        "--parallel-copies", type=int, default=4, metavar="N",
+        "--prefix", type=deployment_name, default="lab", help="Deployment name prefix (default: lab)"
+    )
+    deploy_cmd.add_argument(
+        "--parallel-copies", type=positive_int, default=4, metavar="N",
         help="Concurrent deployments (default: 4)",
     )
-    deploy_cmd.add_argument("--tofu-parallelism", type=int, metavar="N", help="OpenTofu operations per unit")
+    deploy_cmd.add_argument(
+        "--tofu-parallelism", type=positive_int, metavar="N", help="OpenTofu operations per unit"
+    )
     deploy_cmd.add_argument("--debug", action="store_true", help="Stream full Packer and Terragrunt output")
 
     resume = commands.add_parser("resume", help="Resume a run; defaults to the latest")
@@ -100,11 +106,23 @@ def make_parser() -> argparse.ArgumentParser:
 
     destroy_cmd = commands.add_parser("destroy", help="Destroy a saved run or scenario copies")
     destroy_cmd.add_argument("target", help="RUN_ID or scenario name")
-    destroy_cmd.add_argument("--copies", type=int, metavar="N", help="Destroy PREFIX-001 through PREFIX-N")
-    destroy_cmd.add_argument("--prefix", default="lab", help="Deployment name prefix (default: lab)")
-    destroy_cmd.add_argument("--parallel-copies", type=int, metavar="N", help="Concurrent deployments")
-    destroy_cmd.add_argument("--tofu-parallelism", type=int, metavar="N", help="OpenTofu operations per unit")
+    destroy_cmd.add_argument(
+        "--copies", type=positive_int, metavar="N", help="Destroy PREFIX-001 through PREFIX-N"
+    )
+    destroy_cmd.add_argument(
+        "--prefix", type=deployment_name, default="lab", help="Deployment name prefix (default: lab)"
+    )
+    destroy_cmd.add_argument(
+        "--parallel-copies", type=positive_int, metavar="N", help="Concurrent deployments"
+    )
+    destroy_cmd.add_argument(
+        "--tofu-parallelism", type=positive_int, metavar="N", help="OpenTofu operations per unit"
+    )
     destroy_cmd.add_argument("--debug", action="store_true", help="Stream full Terragrunt output")
+    destroy_cmd.add_argument(
+        "--delete-states", action="store_true",
+        help="Delete empty GitLab Terraform states after a successful destroy",
+    )
 
     return parser
 
@@ -120,7 +138,20 @@ def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParse
         if job["action"] == "build":
             parser.error("Build-only runs have no infrastructure to destroy")
         if job.get("destroyed"):
-            print(f"Already destroyed: {directory}")
+            if args.delete_states and not job.get("states_deleted"):
+                for variable in (
+                    "GITLAB_STATE_REPOSITORY", "CR_GITLAB_ACCESS_TOKEN",
+                    "OS_PROJECT_NAME", "OS_USER_DOMAIN_NAME",
+                ):
+                    if not os.environ.get(variable):
+                        parser.error(f"{variable} is required for --delete-states")
+                for name in job["deployments"]:
+                    deploy.delete_deployment_states(name, job["units"])
+                job["states_deleted"] = True
+                save_json(directory / "run.json", job)
+                print(f"Deleted empty Terraform states: {directory}")
+            else:
+                print(f"Already destroyed: {directory}")
             return 0
         scenario = job["scenario"]
         selection = []
@@ -141,6 +172,8 @@ def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParse
     command = [scenario, "destroy", "--parallel-copies", str(parallel_copies), *selection]
     if tofu_parallelism is not None:
         command += ["--tofu-parallelism", str(tofu_parallelism)]
+    if args.delete_states:
+        command.append("--delete-states")
     images_file = directory / "images.json" if directory is not None else None
     if images_file is not None and not images_file.is_file():
         images_file = None
@@ -148,6 +181,7 @@ def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParse
     if job is not None:
         job["deployed"] = False
         job["destroyed"] = True
+        job["states_deleted"] = args.delete_states
         save_json(directory / "run.json", job)
     return 0
 
@@ -155,16 +189,6 @@ def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParse
 def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
     parser = make_parser()
     args = parser.parse_args(argv)
-
-    if args.action in ("deploy", "destroy"):
-        if args.copies is not None and args.copies < 1:
-            parser.error("--copies must be positive")
-        if args.parallel_copies is not None and args.parallel_copies < 1:
-            parser.error("--parallel-copies must be positive")
-        if args.tofu_parallelism is not None and args.tofu_parallelism < 1:
-            parser.error("--tofu-parallelism must be positive")
-        if not re.fullmatch(r"[a-z][a-z0-9-]*", args.prefix):
-            parser.error("Invalid deployment prefix")
 
     if args.action == "destroy":
         return destroy(args, root, parser)

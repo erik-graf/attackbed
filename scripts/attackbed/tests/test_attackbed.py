@@ -1,6 +1,7 @@
 """Checks for image selection, resuming builds, and per-lab SSH aliases."""
 
 import json
+import os
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -166,6 +167,7 @@ class WorkflowTests(unittest.TestCase):
         job = json.loads((directory / "run.json").read_text())
         self.assertTrue(job["destroyed"])
         self.assertFalse(job["deployed"])
+        self.assertFalse(job["states_deleted"])
         with self.assertRaises(SystemExit):
             cli.main(["resume", directory.name], self.root)
 
@@ -305,6 +307,52 @@ class WorkflowTests(unittest.TestCase):
                 images.build_image(self.conn, self.root, "firewall", self.root / "build.log")
         self.assertEqual(run.call_count, 1)
         popen.assert_not_called()
+
+
+    def test_argparse_rejects_invalid_numeric_and_prefix_arguments(self):
+        parser = cli.make_parser()
+        for arguments in (
+            ["deploy", "core", "--copies", "0"],
+            ["deploy", "core", "--parallel-copies", "-2"],
+            ["deploy", "core", "--tofu-parallelism", "no"],
+            ["deploy", "core", "--prefix", "INVALID"],
+            ["destroy", "core", "--copies", "-1"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit) as error:
+                parser.parse_args(arguments)
+            self.assertEqual(error.exception.code, 2)
+
+    def test_destroy_can_clean_states_after_prior_destroy(self):
+        directory = self.root / "runs" / "run-20261123-cleanup"
+        directory.mkdir(parents=True)
+        job = {
+            "action": "deploy", "scenario": "core", "deployments": ["lab-001"],
+            "units": ["bootstrap"], "destroyed": True, "deployed": False,
+            "parallel_copies": 2, "tofu_parallelism": None,
+        }
+        cli.save_json(directory / "run.json", job)
+        credentials = {
+            "GITLAB_STATE_REPOSITORY": "https://gitlab.example/api/v4/projects/123/terraform/state",
+            "CR_GITLAB_ACCESS_TOKEN": "test-token",
+            "OS_PROJECT_NAME": "Default", "OS_USER_DOMAIN_NAME": "Default",
+        }
+        with patch.dict(os.environ, credentials), \
+             patch.object(deploy, "delete_deployment_states") as cleanup, \
+             patch.object(deploy, "main") as invoke:
+            self.assertEqual(cli.main(["destroy", directory.name, "--delete-states"], self.root), 0)
+            cleanup.assert_called_once_with("lab-001", ["bootstrap"])
+            self.assertEqual(cli.main(["destroy", directory.name, "--delete-states"], self.root), 0)
+        invoke.assert_not_called()
+        cleanup.assert_called_once()
+        self.assertTrue(json.loads((directory / "run.json").read_text())["states_deleted"])
+
+    def test_delete_states_switch_is_forwarded_to_terragrunt(self):
+        with patch.object(deploy, "main", return_value=0) as invoke:
+            self.assertEqual(
+                cli.main(["destroy", "core", "--copies", "1", "--delete-states"], self.root),
+                0,
+            )
+        self.assertIn("--delete-states", invoke.call_args.args[0])
 
 
 class SSHTests(unittest.TestCase):

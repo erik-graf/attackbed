@@ -13,6 +13,7 @@ uv run attackbed resume                        # Resume latest run
 uv run attackbed resume RUN_ID
 uv run attackbed destroy RUN_ID
 uv run attackbed destroy demo --copies 2
+uv run attackbed destroy RUN_ID --delete-states # Also works after a previous destroy
 ```
 
 Use `attackbed --help` and `attackbed ACTION --help` for all options.
@@ -22,6 +23,7 @@ Use `attackbed --help` and `attackbed ACTION --help` for all options.
 - `--tofu-parallelism N`: OpenTofu parallelism per unit (otherwise uses the Terragrunt setting).
 - `--debug`: stream full Terragrunt output or Packer diagnostics and show tracebacks for operational failures.
 - Deploy and destroy run without confirmation. A run-ID destroy uses saved deployment names; scenario/copies destroy does **not** update a saved run.
+- `--delete-states` (destroy only): clean up empty GitLab Terraform states after successful destroy. Without it, states are retained. You can add the flag to an already-destroyed run to clean up later.
 - Resume continues the original action; resuming a `build` never deploys.
 
 ## Configuration
@@ -32,13 +34,17 @@ Set shared Packer options in ignored `packer/defaults.json` (copy `defaults.json
 
 Deployment settings live in `terragrunt/defaults.tfvars` and optional ignored `terragrunt/terraform.tfvars`.
 
+The `all` scenario includes all nine Terragrunt units, primarily for `attackbed build all`. It may not deploy as one lab because some units create overlapping infrastructure.
+
 ## Runs and networking
 
 Each invocation saves `runs/RUN_ID/run.json`, image selections in `images.json`, and logs under `logs/` (`packer/RECIPE.log`, `apply.log`, `destroy.log`). Packer logs include `ansible-galaxy` and `packer init` output, including failures. Terragrunt logs record the command output from all deployment threads. Errors exit nonzero; already-running copies are allowed to finish and the summary reports failures. Retries append. Successful deployment also writes `ssh_config`. Each host uses its OpenStack keypair name as `IdentityFile ~/.ssh/KEY_NAME`; keep the private key under that filename locally. Build-only runs create no OpenStack deployment VMs. A saved image selection can be reused with `deploy --images`.
 
 Bootstrap creates five vRack networks per deployment with VLANs `1000 + (N - 1) * 5` through `+4`, where `N` is the deployment ID's three-digit suffix (`001`–`500`). **Prefixes do not isolate VLANs:** `lab-001` and `test-001` collide. Do not reuse suffixes within the same vRack. Use the same scenario when destroying, including after partial failures.
 
-After successful destroy, the orchestrator deletes empty GitLab Terraform states; it refuses to delete states that still track managed resources. Glance images and logs remain.
+GitLab Terraform states remain after normal destroy. With `--delete-states`, the orchestrator deletes only empty states following successful destruction, refusing to delete states that still track managed resources. Glance images and logs remain.
+
+The router gateway helper in `terragrunt/bootstrap/scripts/router_gateway.py` uses openstacksdk. Terraform runs it through `uv run --package attackbed-cli`, so uv must be on PATH for standalone Terragrunt runs.
 
 Tests: `uv run --package attackbed-cli pytest scripts/attackbed/tests` from the repository root. Advanced standalone commands use `uv run python -m attackbed.deploy SCENARIO {plan,apply,destroy} --copies N` and write their own run logs. `plan` is not a top-level CLI action.
 
