@@ -18,7 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 def required_recipes(root: Path, units: Sequence[str]) -> dict[str, str]:
     recipes: dict[str, str] = yaml.safe_load((root / "config/image-recipes.yaml").read_text())
-    variables = set()
+    variables: set[str] = set()
     for unit in units:
         for path in (root / "terragrunt" / unit / "module").glob("*.tf"):
             variables.update(re.findall(r'variable\s+"(\w+_image)"', path.read_text()))

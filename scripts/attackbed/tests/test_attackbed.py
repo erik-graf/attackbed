@@ -145,7 +145,9 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(cli, "connect", return_value=self.conn) as connect, \
              patch.object(cli, "write_ssh_config"), \
              patch.object(deploy, "main", side_effect=run) as invoke:
-            self.assertEqual(cli.main(["deploy", "core", "--copies", "2", "--tofu-parallelism", "3"], self.root), 0)
+            self.assertEqual(
+                cli.main(["deploy", "core", "--copies", "2", "--tofu-parallelism", "3"], self.root), 0,
+            )
             directory = next((self.root / "runs").iterdir())
             invoke.reset_mock()
             self.assertEqual(cli.main(["destroy", directory.name], self.root), 0)
@@ -272,7 +274,8 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(images.subprocess, "run") as run, patch.object(images.subprocess, "Popen") as popen:
             proc = popen.return_value.__enter__.return_value
             proc.stdout = ["123,openstack.builder,artifact,0,builder-id,mitchellh.openstack\n",
-                           "123,openstack.builder,artifact,0,id,eu-west-par:44444444-4444-4444-4444-444444444444\n"]
+                           "123,openstack.builder,artifact,0,id,"
+                           "eu-west-par:44444444-4444-4444-4444-444444444444\n"]
             proc.wait.return_value = 0
             log_path = self.root / "build.log"
             log_path.write_text("previous build\n")
@@ -292,7 +295,10 @@ class WorkflowTests(unittest.TestCase):
 
     def test_packer_stops_when_ansible_roles_fail(self):
         with (
-            patch.object(images.subprocess, "run", side_effect=images.subprocess.CalledProcessError(1, "ansible-galaxy")) as run,
+            patch.object(
+                images.subprocess, "run",
+                side_effect=images.subprocess.CalledProcessError(1, "ansible-galaxy"),
+            ) as run,
             patch.object(images.subprocess, "Popen") as popen,
         ):
             with self.assertRaises(CommandError):

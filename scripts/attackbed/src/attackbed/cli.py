@@ -4,7 +4,6 @@ import argparse
 from datetime import datetime, timezone
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import sys
@@ -80,14 +79,23 @@ def make_parser() -> argparse.ArgumentParser:
     source = deploy_cmd.add_mutually_exclusive_group()
     source.add_argument("--build", action="store_true", help="Build images before deploying")
     source.add_argument("--images", type=Path, metavar="FILE", help="Use image selection from JSON file")
-    deploy_cmd.add_argument("--copies", type=int, default=1, metavar="N", help="Deploy PREFIX-001 through PREFIX-N (default: 1)")
+    deploy_cmd.add_argument(
+        "--copies", type=int, default=1, metavar="N",
+        help="Deploy PREFIX-001 through PREFIX-N (default: 1)",
+    )
     deploy_cmd.add_argument("--prefix", default="lab", help="Deployment name prefix (default: lab)")
-    deploy_cmd.add_argument("--parallel-copies", type=int, default=4, metavar="N", help="Concurrent deployments (default: 4)")
+    deploy_cmd.add_argument(
+        "--parallel-copies", type=int, default=4, metavar="N",
+        help="Concurrent deployments (default: 4)",
+    )
     deploy_cmd.add_argument("--tofu-parallelism", type=int, metavar="N", help="OpenTofu operations per unit")
     deploy_cmd.add_argument("--debug", action="store_true", help="Stream full Packer and Terragrunt output")
 
     resume = commands.add_parser("resume", help="Resume a run; defaults to the latest")
-    resume.add_argument("run_id", nargs="?", default="latest", metavar="RUN_ID", help="Saved run ID (default: latest)")
+    resume.add_argument(
+        "run_id", nargs="?", default="latest", metavar="RUN_ID",
+        help="Saved run ID (default: latest)",
+    )
     resume.add_argument("--debug", action="store_true", help="Stream full Packer and Terragrunt output")
 
     destroy_cmd = commands.add_parser("destroy", help="Destroy a saved run or scenario copies")
@@ -119,7 +127,9 @@ def destroy(args: argparse.Namespace, root: Path, parser: argparse.ArgumentParse
         for name in job["deployments"]:
             selection += ["--deployment", name]
         parallel_copies = args.parallel_copies or job["parallel_copies"]
-        tofu_parallelism = args.tofu_parallelism if args.tofu_parallelism is not None else job["tofu_parallelism"]
+        tofu_parallelism = (
+            args.tofu_parallelism if args.tofu_parallelism is not None else job["tofu_parallelism"]
+        )
     else:
         if args.copies is None:
             parser.error("Destroying a scenario requires --copies")
@@ -172,7 +182,8 @@ def main(argv: Sequence[str] | None = None, root: Path = ROOT) -> int:
         units = list(dict.fromkeys(scenarios[args.scenario]))
         if "bootstrap" not in units:
             parser.error("Scenario must include bootstrap")
-        directory = runs / ("run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6])
+        run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
+        directory = runs / run_id
         directory.mkdir(parents=True, mode=0o700)
         build_images = args.action == "build" or args.build
         image_source = args.images if args.action == "deploy" else None

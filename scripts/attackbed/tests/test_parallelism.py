@@ -39,7 +39,8 @@ class ParallelismTests(unittest.TestCase):
                 process = popen.return_value.__enter__.return_value
                 process.stdout = []
                 process.wait.return_value = 0
-                deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"]).run_unit("bootstrap", "apply")
+                deployment = deploy.TerragruntDeployment(Path("/tmp"), "lab-001", ["bootstrap"])
+                deployment.run_unit("bootstrap", "apply")
         self.assertNotIn("TF_VAR_parallelism", popen.call_args.kwargs["env"])
 
 
