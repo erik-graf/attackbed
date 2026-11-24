@@ -1,0 +1,55 @@
+# AttackBed scenarios and image recipes.
+scenarios:
+  all:
+    - bootstrap
+    - attacker
+    - client
+    - docker
+    - lanturtle
+    - logging
+    - repository
+    - videoserver
+    - wazuh
+  core:
+    - bootstrap
+  attack:
+    - bootstrap
+    - attacker
+  video:
+    - bootstrap
+    - videoserver
+  demo:
+    - bootstrap
+    - attacker
+    - videoserver
+  repository:
+    - bootstrap
+    - attacker
+    - repository
+  client:
+    - bootstrap
+    - attacker
+    - client
+  lanturtle:
+    - bootstrap
+    - lanturtle
+  docker:
+    - bootstrap
+    - attacker
+    - docker
+
+image_recipes:
+  adminpc_image: adminpc
+  attacker_image: attacker
+  client_image: client
+  corpdns_image: corpdns
+  docker_image: docker
+  inetfw_image: firewall
+  kafka_image: kafka
+  linuxshare_image: linuxshare
+  logstash_image: logstash
+  opensearch_image: opensearch
+  reposerver_image: repository
+  videoserver_image: videoserver
+  wazuh_image: wazuh
+  webcam_image: webcam

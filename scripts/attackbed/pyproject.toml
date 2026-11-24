@@ -1,0 +1,51 @@
+[project]
+name = "attackbed-cli"
+description = "Build AttackBed images and manage multi-instance OpenStack deployments."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+dynamic = ["version"]
+dependencies = ["PyYAML>=6,<7", "openstacksdk>=2,<5"]
+
+[project.scripts]
+attackbed = "attackbed.cli:entrypoint"
+
+[dependency-groups]
+dev = [
+    "deptry>=0.25.1",
+    "prek>=0.4.11",
+    "pytest>=9.1.0",
+    "pytest-cov>=6.2.1",
+    "pytest-xdist>=3.8.0",
+    "types-PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "attackbed.metadata.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+
+[tool.isort]
+line_length = 110
+multi_line_output = 3
+include_trailing_comma = true
+known_first_party = ["attackbed"]
+src_paths = ["src", "tests"]
+
+[tool.deptry]
+known_first_party = ["attackbed"]
