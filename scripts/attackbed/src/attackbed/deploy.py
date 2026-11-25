@@ -2,7 +2,7 @@
 """Run independent AttackBed deployments using the existing Terragrunt units."""
 
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
 import logging
@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
@@ -151,7 +151,7 @@ def delete_deployment_states(
 
 def run_deployments(
     root: Path,
-    units: Sequence[str],
+    units: Sequence[str] | Mapping[str, Sequence[str]],
     names: Sequence[str],
     action: str,
     *,
@@ -161,6 +161,7 @@ def run_deployments(
     delete_states: bool = False,
     debug: bool = False,
     env_override: Mapping[str, str] | None = None,
+    on_success: Callable[[str], None] | None = None,
 ) -> int:
     """Orchestrate the specified units without parsing CLI arguments."""
     if action not in ("plan", "apply", "destroy"):
@@ -171,7 +172,14 @@ def run_deployments(
         raise ValueError("Parallelism must be positive")
     if delete_states and action != "destroy":
         raise ValueError("State cleanup is only available for destroy")
-    if not units or any(not (root / unit / "terragrunt.hcl").is_file() for unit in units):
+    if isinstance(units, Mapping):
+        if any(name not in units for name in names):
+            raise ValueError("Missing units for a deployment")
+        unit_sets = {name: list(units[name]) for name in names}
+    else:
+        unit_sets = {name: list(units) for name in names}
+    if any(not selected or any(not (root / unit / "terragrunt.hcl").is_file()
+                               for unit in selected) for selected in unit_sets.values()):
         raise ValueError("Terragrunt units must exist and contain terragrunt.hcl")
 
     env = {**os.environ, **(env_override or {})}
@@ -201,7 +209,7 @@ def run_deployments(
 
         def worker(name: str) -> tuple[str, AttackBedError | None]:
             deployment = TerragruntDeployment(
-                root, name, list(units), tofu_parallelism=tofu_parallelism,
+                root, name, unit_sets[name], tofu_parallelism=tofu_parallelism,
                 log_path=log_path, debug=debug, env=env, delete_states=delete_states,
             )
             try:
@@ -211,8 +219,14 @@ def run_deployments(
                 return name, exc
             return name, None
 
+        results = []
         with ThreadPoolExecutor(max_workers=parallel_copies) as executor:
-            results = list(executor.map(worker, dict.fromkeys(names)))
+            futures = [executor.submit(worker, name) for name in dict.fromkeys(names)]
+            for future in as_completed(futures):
+                name, error = future.result()
+                results.append((name, error))
+                if error is None and on_success is not None:
+                    on_success(name)
         failures = [name for name, error in results if error is not None]
         LOGGER.info("%d deployment(s) succeeded, %d failed", len(results) - len(failures), len(failures))
     finally:

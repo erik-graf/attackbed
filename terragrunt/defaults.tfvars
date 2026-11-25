@@ -3,6 +3,7 @@
 # CLI-selected images from runs/<run-id>/images.json take precedence at runtime.
 # default_flavor only applies to the small VM roles listed in root.hcl.
 
+use_provider_vlans = true # Set false for standard Neutron tenant networks (no vRack VLANs).
 default_flavor    = "d2-2"
 sshkey            = "testbed-key"
 floating_pool     = "Ext-Net"

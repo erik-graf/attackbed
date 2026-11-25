@@ -32,6 +32,9 @@ locals {
     for name, image in local.image_choices : name => image.name
   }
 
+  # The CLI may override provider VLANs per run; otherwise use the tfvars setting.
+  provider_vlans = get_env("ATTACKBED_USE_PROVIDER_VLANS", tostring(lookup(local.settings, "use_provider_vlans", true))) == "true"
+
   state_name = join("_", [
     get_env("OS_PROJECT_NAME"),
     get_env("OS_USER_DOMAIN_NAME"),
@@ -55,7 +58,8 @@ inputs = merge(
   local.settings,
   local.selected_images,
   {
-    deployment_id = local.deployment_id
+    deployment_id     = local.deployment_id
+    use_provider_vlans = local.provider_vlans
   }
 )
 

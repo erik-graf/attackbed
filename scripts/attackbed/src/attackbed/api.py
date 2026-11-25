@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
 import yaml
@@ -69,6 +69,17 @@ def scenario_units(root: Path, scenario: str) -> list[str]:
     return units
 
 
+def all_scenario_units(root: Path) -> dict[str, list[str]]:
+    """Select each configured scenario except the image-building aggregate."""
+    configured = yaml.safe_load((root / "config/config.yaml").read_text())["scenarios"]
+    selected = [name for name in configured if name != "all"]
+    if not selected:
+        raise ValueError("No scenarios to deploy (excluding all)")
+    if any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in selected):
+        raise ValueError("Scenario names must contain lowercase letters, digits or hyphens")
+    return {name: scenario_units(root, name) for name in selected}
+
+
 def write_image_tfvars(path: Path, images: dict[str, dict[str, str]]) -> None:
     """Write selected Glance image names as ordinary HCL Terraform variables."""
     lines = ["# Image names selected for this AttackBed run."]
@@ -87,17 +98,23 @@ def _save_images(directory: Path, images: dict[str, dict[str, str]]) -> None:
 
 
 def _run_terragrunt(
-    root: Path, units: list[str], deployments: list[str], action: str, *,
+    root: Path, units: Sequence[str] | Mapping[str, Sequence[str]],
+    deployments: list[str], action: str, *,
     run_dir: Path, images_file: Path | None = None, parallel_copies: int = 4,
     tofu_parallelism: int | None = None, delete_states: bool = False, debug: bool = False,
+    use_provider_vlans: bool | None = None,
+    on_success: Callable[[str], None] | None = None,
 ) -> None:
     env_override = {
         "ATTACKBED_IMAGES_FILE": str(images_file.resolve()) if images_file is not None else "",
     }
+    if use_provider_vlans is not None:
+        env_override["ATTACKBED_USE_PROVIDER_VLANS"] = str(use_provider_vlans).lower()
     result = terragrunt.run_deployments(
         root / "terragrunt", units, deployments, action, run_dir=run_dir,
         parallel_copies=parallel_copies, tofu_parallelism=tofu_parallelism,
         delete_states=delete_states, debug=debug, env_override=env_override,
+        on_success=on_success,
     )
     if result:
         raise AttackBedError(f"Terragrunt {action} failed; see {run_dir / 'logs' / (action + '.log')}")
@@ -147,11 +164,22 @@ def _continue_run(
         return directory
 
     if not job["deployed"]:
-        _run_terragrunt(
-            root, job["units"], job["deployments"], "apply", run_dir=directory,
-            images_file=images_file, parallel_copies=job["parallel_copies"],
-            tofu_parallelism=job["tofu_parallelism"], debug=debug,
-        )
+        unit_sets = job.get("scenario_deployments")
+        completed = job.setdefault("completed_deployments", []) if unit_sets else []
+        pending = [name for name in job["deployments"] if name not in completed]
+
+        def record_success(name: str) -> None:
+            completed.append(name)
+            save_json(directory / "run.json", job)
+
+        if pending:
+            _run_terragrunt(
+                root, unit_sets or job["units"], pending, "apply", run_dir=directory,
+                images_file=images_file, parallel_copies=job["parallel_copies"],
+                tofu_parallelism=job["tofu_parallelism"], debug=debug,
+                use_provider_vlans=job.get("use_provider_vlans"),
+                on_success=record_success if unit_sets else None,
+            )
         job["deployed"] = True
         save_json(directory / "run.json", job)
 
@@ -163,12 +191,13 @@ def _continue_run(
 
 
 def _start_run(
-    scenario: str, action: Literal["build", "deploy"], *, root: Path,
+    scenario: str | None, action: Literal["build", "deploy"], *, root: Path,
     copies: int = 1, prefix: str = "lab", parallel_copies: int = 4,
     tofu_parallelism: int | None = None, build_images: bool = False,
     images: Path | None = None, connection: Any = None, debug: bool = False,
+    all_scenarios: bool = False, start_index: int = 1,
+    use_provider_vlans: bool | None = None,
 ) -> Path:
-    units = scenario_units(root, scenario)
     if copies < 1 or parallel_copies < 1 or (tofu_parallelism is not None and tofu_parallelism < 1):
         raise ValueError("Copies and parallelism must be positive")
     if not re.fullmatch(r"[a-z][a-z0-9-]*", prefix):
@@ -177,15 +206,37 @@ def _start_run(
         raise ValueError("Cannot combine image builds with an explicit image file")
     if action == "build":
         build_images = True
+    if all_scenarios:
+        if action != "deploy" or scenario is not None:
+            raise ValueError("--all-scenarios requires deploy without a scenario name")
+        configured = all_scenario_units(root)
+        if start_index < 1 or start_index + len(configured) * copies - 1 > 500:
+            raise ValueError("Deployment index must be between 1 and 500")
+        scenario_deployments = {}
+        index = start_index
+        for name, selected_units in configured.items():
+            for _ in range(copies):
+                scenario_deployments[f"{prefix}-{name}-{index:03d}"] = selected_units
+                index += 1
+        units = list(dict.fromkeys(unit for selected in scenario_deployments.values()
+                                  for unit in selected))
+    else:
+        if scenario is None:
+            raise ValueError("A scenario name is required")
+        if start_index != 1:
+            raise ValueError("--start-index requires --all-scenarios")
+        scenario_deployments = {}
+        units = scenario_units(root, scenario)
 
     run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
     directory = root / "runs" / run_id
     directory.mkdir(parents=True, mode=0o700)
     job: dict[str, Any] = {
         "action": action,
-        "scenario": scenario,
+        "scenario": scenario if scenario is not None else "all-scenarios",
         "units": units,
-        "deployments": ([f"{prefix}-{n:03d}" for n in range(1, copies + 1)]
+        "deployments": (list(scenario_deployments) if all_scenarios
+                        else [f"{prefix}-{n:03d}" for n in range(1, copies + 1)]
                         if action == "deploy" else []),
         "mode": "build" if build_images else "file" if images is not None else "latest",
         "source_images": str(images.expanduser().resolve()) if images is not None else None,
@@ -193,7 +244,11 @@ def _start_run(
         "tofu_parallelism": tofu_parallelism if action == "deploy" else None,
         "deployed": False,
         "complete": False,
+        "use_provider_vlans": use_provider_vlans,
     }
+    if scenario_deployments:
+        job["scenario_deployments"] = scenario_deployments
+        job["completed_deployments"] = []
     save_json(directory / "run.json", job)
     return _continue_run(directory, job, root=root, connection=connection, debug=debug)
 
@@ -204,15 +259,19 @@ def build(scenario: str, *, root: Path = ROOT, connection: Any = None, debug: bo
 
 
 def deploy(
-    scenario: str, *, copies: int = 1, prefix: str = "lab", parallel_copies: int = 4,
-    tofu_parallelism: int | None = None, build_images: bool = False, images: Path | None = None,
+    scenario: str | None = None, *, copies: int = 1, prefix: str = "lab",
+    parallel_copies: int = 4, tofu_parallelism: int | None = None,
+    build_images: bool = False, images: Path | None = None,
     root: Path = ROOT, connection: Any = None, debug: bool = False,
+    all_scenarios: bool = False, start_index: int = 1,
+    use_provider_vlans: bool | None = None,
 ) -> Path:
-    """Deploy scenario copies, using latest, supplied, or freshly built images."""
+    """Deploy one scenario or every configured scenario as isolated deployments."""
     return _start_run(
         scenario, "deploy", copies=copies, prefix=prefix, parallel_copies=parallel_copies,
         tofu_parallelism=tofu_parallelism, build_images=build_images, images=images,
-        root=root, connection=connection, debug=debug,
+        root=root, connection=connection, debug=debug, all_scenarios=all_scenarios,
+        start_index=start_index, use_provider_vlans=use_provider_vlans,
     )
 
 
@@ -260,14 +319,15 @@ def destroy(
             if delete_states and not job.get("states_deleted"):
                 _check_state_credentials()
                 for name in job["deployments"]:
-                    terragrunt.delete_deployment_states(name, job["units"])
+                    units_for_name = job.get("scenario_deployments", {}).get(name, job["units"])
+                    terragrunt.delete_deployment_states(name, units_for_name)
                 job["states_deleted"] = True
                 save_json(directory / "run.json", job)
                 print(f"Deleted empty Terraform states: {directory}")
             else:
                 print(f"Already destroyed: {directory}")
             return directory
-        units = job.get("units") or scenario_units(root, job["scenario"])
+        units = job.get("scenario_deployments") or job.get("units") or scenario_units(root, job["scenario"])
         deployments = job["deployments"]
         parallel_copies = parallel_copies or job["parallel_copies"]
         tofu_parallelism = tofu_parallelism if tofu_parallelism is not None else job["tofu_parallelism"]
@@ -289,6 +349,7 @@ def destroy(
         root, units, deployments, "destroy", run_dir=directory, images_file=image_file,
         parallel_copies=parallel_copies, tofu_parallelism=tofu_parallelism,
         delete_states=delete_states, debug=debug,
+        use_provider_vlans=job.get("use_provider_vlans") if target.startswith("run-") else None,
     )
     if target.startswith("run-"):
         job["deployed"] = False

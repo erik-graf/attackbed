@@ -7,9 +7,8 @@ locals {
   fw_userdata_file    = var.fw_userdata == null ? "${path.module}/scripts/firewallinit.yml" : var.fw_userdata
   mgmt_userdata_file    = var.mgmt_userdata == null ? "${path.module}/scripts/mgmtinit.yml" : var.mgmt_userdata
   ext_dnsserver_userdata_file = var.corpdns_userdata == null ? "${path.module}/scripts/corpdns.yml" : var.corpdns_userdata
-  # OVH's automatically allocated Neutron segmentation range limited our network count.
-  # Explicit vRack VLAN IDs (five per deployment) allow more isolated copies.
-  # Numeric suffixes must be unique in the same vRack, regardless of prefix.
+  # Provider VLAN IDs are optional; regular tenant networks need no VLAN specs.
+  # When enabled, suffixes must be unique in the same vRack regardless of prefix.
   vlan_base = 1000 + (tonumber(regex("[0-9]{3}$", var.deployment_id)) - 1) * 5
 }
 
@@ -57,10 +56,10 @@ resource "openstack_networking_network_v2" "internet" {
   name           = "${var.deployment_id}-internet"
   port_security_enabled = "false"
   admin_state_up = "true"
-  value_specs = {
+  value_specs = var.use_provider_vlans ? {
     "provider:network_type"    = "vrack"
     "provider:segmentation_id" = local.vlan_base
-  }
+  } : {}
 }
 
 resource "openstack_networking_subnet_v2" "internet_subnet" {
@@ -143,10 +142,10 @@ resource "openstack_networking_network_v2" "lan" {
   name           = "${var.deployment_id}-lan"
   port_security_enabled = "false"
   admin_state_up = "true"
-  value_specs = {
+  value_specs = var.use_provider_vlans ? {
     "provider:network_type"    = "vrack"
     "provider:segmentation_id" = local.vlan_base + 1
-  }
+  } : {}
 }
 
 resource "openstack_networking_subnet_v2" "lan_subnet" {
@@ -172,10 +171,10 @@ resource "openstack_networking_network_v2" "dmz" {
   name           = "${var.deployment_id}-dmz"
   port_security_enabled = "false"
   admin_state_up = "true"
-  value_specs = {
+  value_specs = var.use_provider_vlans ? {
     "provider:network_type"    = "vrack"
     "provider:segmentation_id" = local.vlan_base + 2
-  }
+  } : {}
 }
 
 resource "openstack_networking_subnet_v2" "dmz_subnet" {
@@ -202,10 +201,10 @@ resource "openstack_networking_network_v2" "admin" {
   name           = "${var.deployment_id}-admin"
   port_security_enabled = "false"
   admin_state_up = "true"
-  value_specs = {
+  value_specs = var.use_provider_vlans ? {
     "provider:network_type"    = "vrack"
     "provider:segmentation_id" = local.vlan_base + 3
-  }
+  } : {}
 }
 
 resource "openstack_networking_subnet_v2" "admin_subnet" {
@@ -232,10 +231,10 @@ resource "openstack_networking_network_v2" "user" {
   name           = "${var.deployment_id}-user"
   port_security_enabled = "false"
   admin_state_up = "true"
-  value_specs = {
+  value_specs = var.use_provider_vlans ? {
     "provider:network_type"    = "vrack"
     "provider:segmentation_id" = local.vlan_base + 4
-  }
+  } : {}
 }
 
 resource "openstack_networking_subnet_v2" "user_subnet" {

@@ -23,7 +23,19 @@ def make_parser() -> argparse.ArgumentParser:
     build.add_argument("--debug", action="store_true", help="Stream Packer diagnostic output")
 
     deploy_cmd = commands.add_parser("deploy", help="Deploy scenario using existing or newly built images")
-    deploy_cmd.add_argument("scenario", help="Scenario from config/config.yaml")
+    deploy_cmd.add_argument("scenario", nargs="?", help="Scenario from config/config.yaml")
+    deploy_cmd.add_argument(
+        "--all-scenarios", action="store_true",
+        help="Deploy every configured scenario except all as separate labs",
+    )
+    deploy_cmd.add_argument(
+        "--start-index", type=positive_int, default=1, metavar="N",
+        help="First deployment number for --all-scenarios (default: 1)",
+    )
+    deploy_cmd.add_argument(
+        "--no-provider-vlans", action="store_true",
+        help="Use ordinary Neutron networks instead of provider vRack VLANs",
+    )
     source = deploy_cmd.add_mutually_exclusive_group()
     source.add_argument("--build", action="store_true", help="Build images before deploying")
     source.add_argument("--images", type=Path, metavar="FILE", help="Use image selection from JSON file")
@@ -82,10 +94,18 @@ def main(argv: Sequence[str] | None = None, root: Path = api.ROOT) -> int:
     if args.action == "build":
         api.build(args.scenario, root=root, debug=args.debug)
     elif args.action == "deploy":
+        if args.all_scenarios and args.scenario is not None:
+            parser.error("Do not provide a scenario with --all-scenarios")
+        if not args.all_scenarios and args.scenario is None:
+            parser.error("Specify a scenario or --all-scenarios")
+        if not args.all_scenarios and args.start_index != 1:
+            parser.error("--start-index requires --all-scenarios")
         api.deploy(
             args.scenario, copies=args.copies, prefix=args.prefix,
             parallel_copies=args.parallel_copies, tofu_parallelism=args.tofu_parallelism,
             build_images=args.build, images=args.images, root=root, debug=args.debug,
+            all_scenarios=args.all_scenarios, start_index=args.start_index,
+            use_provider_vlans=False if args.no_provider_vlans else None,
         )
     elif args.action == "resume":
         api.resume(args.run_id, root=root, debug=args.debug)

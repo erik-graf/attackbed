@@ -99,3 +99,9 @@ variable "contact" {
   type        = string
   default = "unknown contact"
 }
+
+variable "use_provider_vlans" {
+  type        = bool
+  description = "Set provider vRack VLAN types and segmentation IDs on Neutron networks"
+  default     = true
+}
