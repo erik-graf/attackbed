@@ -24,3 +24,5 @@
                   aecidtools_user: "aecid"
           - role: manage_unattended_upgrades
           - role: kafka
+            vars:
+                  kafka_url: https://archive.apache.org/dist/kafka/3.7.2/kafka_2.12-3.7.2.tgz

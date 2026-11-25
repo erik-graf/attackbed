@@ -243,12 +243,6 @@
         group: root
         mode: '0644'
 
-    - name: Remove dynamic hostname from /etc/hosts
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        regexp: '^127\.0\.1\.1\s+{{ ansible_hostname }}$'
-        state: absent
-      become: true
     - name: Add Suricata suppression rule for cti.wazuh.com
       lineinfile:
         path: /etc/suricata/threshold.config
