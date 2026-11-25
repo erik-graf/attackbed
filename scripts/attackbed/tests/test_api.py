@@ -49,6 +49,31 @@ def test_python_build_api_writes_tfvars_for_both_images(tmp_path: Path) -> None:
     assert json.loads((run / "run.json").read_text())["complete"]
 
 
+
+def test_packer_builds_opensearch_before_logstash(tmp_path: Path) -> None:
+    workspace(tmp_path)
+    (tmp_path / "config/config.yaml").write_text(
+        "scenarios:\n  core: [bootstrap]\n"
+        "image_recipes:\n  logstash_image: logstash\n  opensearch_image: opensearch\n"
+    )
+    (tmp_path / "terragrunt/bootstrap/module/variables.tf").write_text(
+        'variable "logstash_image" {}\nvariable "opensearch_image" {}\n'
+    )
+    built = []
+
+    def build(conn, root, recipe, log, debug=False):
+        built.append(recipe)
+        return {"id": recipe, "name": f"atb-{recipe}"}
+
+    with patch.object(api, "build_image", side_effect=build):
+        run = api.build("core", root=tmp_path, connection=SimpleNamespace())
+
+    assert built == ["opensearch", "logstash"]
+    assert list(json.loads((run / "images.json").read_text())) == [
+        "opensearch_image", "logstash_image",
+    ]
+
+
 def test_python_api_deploy_resume_preserves_selected_image_names(tmp_path: Path) -> None:
     workspace(tmp_path)
     selected = [

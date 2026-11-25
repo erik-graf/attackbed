@@ -22,7 +22,12 @@ def required_recipes(root: Path, units: Sequence[str]) -> dict[str, str]:
     for unit in units:
         for path in (root / "terragrunt" / unit / "module").glob("*.tf"):
             variables.update(re.findall(r'variable\s+"(\w+_image)"', path.read_text()))
-    return {name: recipes[name] for name in sorted(variables & recipes.keys())}
+    selected = sorted(variables & recipes.keys())
+    # OpenSearch fetches the CA certificate required by the Logstash Packer build.
+    if "opensearch_image" in selected and "logstash_image" in selected:
+        selected.remove("opensearch_image")
+        selected.insert(selected.index("logstash_image"), "opensearch_image")
+    return {name: recipes[name] for name in selected}
 
 
 def recipe_config(root: Path, recipe: str, build: bool = False) -> dict[str, Any]:

@@ -34,6 +34,8 @@ Set shared Packer options in ignored `packer/defaults.json` (copy `defaults.json
 
 Deployment settings live in `terragrunt/defaults.tfvars` and optional ignored `terragrunt/terraform.tfvars`.
 
+When both images are required, the OpenSearch Packer build runs before Logstash: it fetches the CA certificate to `packer/logstash/playbook/files/ca.pem`, which Logstash needs during its build. A standalone Logstash Packer build still requires that file to exist.
+
 The `all` scenario includes all nine Terragrunt units, primarily for `attackbed build all`. It may not deploy as one lab because some units create overlapping infrastructure.
 
 ## Runs and networking
