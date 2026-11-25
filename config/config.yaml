@@ -12,27 +12,31 @@ scenarios:
     - wazuh
   core:
     - bootstrap
-  attack:
-    - bootstrap
-    - attacker
-  video:
-    - bootstrap
-    - videoserver
-  demo:
+
+  # Documented AttackBed scenarios (ansible/run/scenario1 through scenario7).
+  videoserver:
     - bootstrap
     - attacker
     - videoserver
-  repository:
+  linuxmalware:
+    - bootstrap
+    - attacker
+    - videoserver
+  lateralmovement:
     - bootstrap
     - attacker
     - repository
+  network:
+    - bootstrap
+    - attacker
+    - repository
+  lanturtle:
+    - bootstrap
+    - lanturtle
   client:
     - bootstrap
     - attacker
     - client
-  lanturtle:
-    - bootstrap
-    - lanturtle
   docker:
     - bootstrap
     - attacker

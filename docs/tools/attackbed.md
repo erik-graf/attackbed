@@ -5,32 +5,34 @@ Run from the repository root with `uv run attackbed`. The CLI is its own Python 
 ## Commands
 
 ```sh
-uv run attackbed build demo                    # Build required Packer images only
-uv run attackbed deploy demo --copies 2        # Deploy with latest matching images
-uv run attackbed deploy demo --build --copies 2
-uv run attackbed deploy demo --images runs/RUN_ID/images.json
-uv run attackbed deploy --all-scenarios --parallel-copies 4    # Every scenario except all
-uv run attackbed deploy --all-scenarios --no-provider-vlans      # Standard Neutron tenant networks
-uv run attackbed deploy --all-scenarios --copies 2 --start-index 101
-uv run attackbed resume                        # Resume latest run
+uv run attackbed --help                         # Actions and all command options
+uv run attackbed build all                       # Build all required Packer images
+uv run attackbed deploy core                     # Bootstrap only
+uv run attackbed deploy videoserver -c 2         # Two independent copies of Scenario 1
+uv run attackbed deploy videoserver -b           # Build images before deploying
+uv run attackbed deploy videoserver -i runs/RUN_ID/images.json
+uv run attackbed deploy -a -v -p 7               # All seven attack scenarios in parallel; standard Neutron networks
+uv run attackbed deploy -a -c 2 -I 101           # Two copies of every attack scenario, starting at suffix 101
+uv run attackbed resume                          # Resume latest run
 uv run attackbed resume RUN_ID
 uv run attackbed destroy RUN_ID
-uv run attackbed destroy demo --copies 2
-uv run attackbed destroy RUN_ID --delete-states # Also works after a previous destroy
+uv run attackbed destroy videoserver -c 2
+uv run attackbed destroy RUN_ID -s               # Destroy and delete empty Terraform states
 ```
 
-Use `attackbed --help` and `attackbed ACTION --help` for all options.
+Top-level `attackbed --help` lists options for all commands; `attackbed ACTION --help` shows detailed usage for one command.
 
-- `--prefix NAME`: deployment IDs `NAME-001`, `NAME-002`, etc. (default: `lab`).
-- `--all-scenarios` (deploy only): deploy each configured scenario except `all` as its own isolated lab.
-- `--copies N`: copies **per scenario** with `--all-scenarios` (default: 1).
-- `--start-index N`: starting numeric suffix for `--all-scenarios`; use unused numbers (default: 1, max: 500).
-- `--no-provider-vlans`: omit provider vRack VLAN type/segmentation IDs and create ordinary Neutron tenant networks.
-- `--parallel-copies N`: concurrent labs or scenarios (default: 4).
-- `--tofu-parallelism N`: OpenTofu parallelism per unit (otherwise uses the Terragrunt setting).
-- `--debug`: stream full Terragrunt output or Packer diagnostics and show tracebacks for operational failures.
+- `-a, --all-scenarios` (deploy only): deploy each of the seven documented attack scenarios as an isolated lab. Excludes `core` and `all`.
+- `-v, --no-provider-vlans` (deploy only): omit provider vRack VLAN type/segmentation IDs and create ordinary Neutron tenant networks.
+- `-p N, --parallel-copies N`: concurrent labs or scenarios (default: 4).
+- `-t N, --tofu-parallelism N`: OpenTofu parallelism per unit (otherwise uses the Terragrunt setting).
+- `-c N, --copies N`: copies of one scenario, or copies **per scenario** with `-a` (default: 1).
+- `-n NAME, --prefix NAME`: deployment name prefix (default: `lab`).
+- `-I N, --start-index N`: starting numeric suffix for `-a`; use unused numbers (default: 1, max: 500).
+- `-b, --build` / `-i FILE, --images FILE`: build images first or use a saved image selection (mutually exclusive).
+- `-d, --debug`: stream full Terragrunt output or Packer diagnostics and show tracebacks for operational failures.
 - Deploy and destroy run without confirmation. A run-ID destroy uses saved deployment names; scenario/copies destroy does **not** update a saved run.
-- `--delete-states` (destroy only): clean up empty GitLab Terraform states after successful destroy. Without it, states are retained. You can add the flag to an already-destroyed run to clean up later.
+- `-s, --delete-states` (destroy only): clean up empty GitLab Terraform states after successful destroy. Without it, states are retained. You can add the flag to an already-destroyed run to clean up later.
 - Resume continues the original action; resuming a `build` never deploys.
 
 ## Configuration
@@ -43,7 +45,7 @@ Deployment settings live in `terragrunt/defaults.tfvars` and optional ignored `t
 
 When both images are required, the OpenSearch Packer build runs before Logstash: it fetches the CA certificate to `packer/logstash/playbook/files/ca.pem`, which Logstash needs during its build. A standalone Logstash Packer build still requires that file to exist.
 
-The `all` scenario includes all nine Terragrunt units, primarily for `attackbed build all`. It may not deploy as one lab because some units create overlapping infrastructure. `deploy --all-scenarios` instead deploys every other named scenario in `config/config.yaml`, preserving their configured unit lists and assigning each copy a distinct suffix (for example `lab-core-001`, `lab-attack-002`). All copies use the same selected images, but each gets independent Neutron networks, a router, and Terraform states.
+The `all` scenario includes all nine Terragrunt units, primarily for `attackbed build all`. It may not deploy as one lab because some units create overlapping infrastructure. The `core` scenario deploys only bootstrap; use `attackbed deploy core` for that. `deploy --all-scenarios` deploys the **seven documented attack scenarios** (Videoserver, Linux Malware, Lateral Movement, Network, LAN Turtle, Client, Docker), excluding both `all` and `core`. The units for each scenario are defined in `config/config.yaml`; each scenario receives a separate deployment ID (for example, `lab-videoserver-001`, `lab-linuxmalware-002`) and its own Neutron networks, router, and Terraform states. Images are selected once and reused by all scenarios. Deploying the infrastructure does not run the attack Ansible playbooks.
 
 For provider vRack networks, `use_provider_vlans = true` in `terragrunt/defaults.tfvars` preserves the existing behavior. Use `--no-provider-vlans` on a deploy to override it for that run, or set `use_provider_vlans = false` in `terragrunt/terraform.tfvars`. This omits both `provider:network_type` and `provider:segmentation_id` from all five bootstrap networks. Saved runs remember the CLI switch for resume and destroy; changing this setting on existing infrastructure could require replacing networks.
 

@@ -70,11 +70,11 @@ def scenario_units(root: Path, scenario: str) -> list[str]:
 
 
 def all_scenario_units(root: Path) -> dict[str, list[str]]:
-    """Select each configured scenario except the image-building aggregate."""
+    """Select documented attack scenarios, excluding the all and core utilities."""
     configured = yaml.safe_load((root / "config/config.yaml").read_text())["scenarios"]
-    selected = [name for name in configured if name != "all"]
+    selected = [name for name in configured if name not in ("all", "core")]
     if not selected:
-        raise ValueError("No scenarios to deploy (excluding all)")
+        raise ValueError("No attack scenarios to deploy (excluding all and core)")
     if any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in selected):
         raise ValueError("Scenario names must contain lowercase letters, digits or hyphens")
     return {name: scenario_units(root, name) for name in selected}

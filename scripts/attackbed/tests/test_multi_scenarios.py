@@ -15,13 +15,14 @@ def workspace(root: Path) -> None:
     (root / "config").mkdir()
     (root / "config/config.yaml").write_text(
         "scenarios:\n"
-        "  all: [bootstrap, attacker, videoserver]\n"
+        "  all: [bootstrap, attacker, videoserver, repository]\n"
         "  core: [bootstrap]\n"
-        "  attack: [bootstrap, attacker]\n"
-        "  video: [bootstrap, videoserver]\n"
+        "  videoserver: [bootstrap, attacker, videoserver]\n"
+        "  linuxmalware: [bootstrap, attacker, videoserver]\n"
+        "  lateralmovement: [bootstrap, attacker, repository]\n"
         "image_recipes: {}\n"
     )
-    for name in ("bootstrap", "attacker", "videoserver"):
+    for name in ("bootstrap", "attacker", "videoserver", "repository"):
         unit = root / "terragrunt" / name
         unit.mkdir(parents=True)
         (unit / "terragrunt.hcl").touch()
@@ -45,15 +46,15 @@ def test_deploy_every_scenario_as_separate_lab(tmp_path: Path) -> None:
     run = next((tmp_path / "runs").iterdir())
     saved = json.loads((run / "run.json").read_text())
     expected = {
-        "lab-core-101": ["bootstrap"],
-        "lab-core-102": ["bootstrap"],
-        "lab-attack-103": ["bootstrap", "attacker"],
-        "lab-attack-104": ["bootstrap", "attacker"],
-        "lab-video-105": ["bootstrap", "videoserver"],
-        "lab-video-106": ["bootstrap", "videoserver"],
+        "lab-videoserver-101": ["bootstrap", "attacker", "videoserver"],
+        "lab-videoserver-102": ["bootstrap", "attacker", "videoserver"],
+        "lab-linuxmalware-103": ["bootstrap", "attacker", "videoserver"],
+        "lab-linuxmalware-104": ["bootstrap", "attacker", "videoserver"],
+        "lab-lateralmovement-105": ["bootstrap", "attacker", "repository"],
+        "lab-lateralmovement-106": ["bootstrap", "attacker", "repository"],
     }
     assert saved["scenario_deployments"] == expected
-    assert saved["units"] == ["bootstrap", "attacker", "videoserver"]
+    assert saved["units"] == ["bootstrap", "attacker", "videoserver", "repository"]
     assert saved["complete"] and saved["deployed"]
     assert runner.call_args.args[1] == expected
     assert runner.call_args.args[2] == list(expected)
@@ -68,7 +69,7 @@ def test_resume_retries_only_failed_scenarios(tmp_path: Path) -> None:
     def runner(root, units, names, action, *, on_success, **kwargs):
         attempts.append(list(names))
         if len(attempts) == 1:
-            on_success("lab-core-001")
+            on_success("lab-videoserver-001")
             return 1
         for name in names:
             on_success(name)
@@ -80,13 +81,13 @@ def test_resume_retries_only_failed_scenarios(tmp_path: Path) -> None:
             api.deploy(all_scenarios=True, root=tmp_path, connection=connection())
         run = next((tmp_path / "runs").iterdir())
         saved = json.loads((run / "run.json").read_text())
-        assert saved["completed_deployments"] == ["lab-core-001"]
+        assert saved["completed_deployments"] == ["lab-videoserver-001"]
         assert not saved["deployed"]
         api.resume(run.name, root=tmp_path, connection=connection())
 
     assert attempts == [
-        ["lab-core-001", "lab-attack-002", "lab-video-003"],
-        ["lab-attack-002", "lab-video-003"],
+        ["lab-videoserver-001", "lab-linuxmalware-002", "lab-lateralmovement-003"],
+        ["lab-linuxmalware-002", "lab-lateralmovement-003"],
     ]
     saved = json.loads((run / "run.json").read_text())
     assert saved["deployed"] and saved["complete"]
@@ -124,17 +125,17 @@ def test_state_cleanup_uses_each_scenarios_unit_list(tmp_path: Path) -> None:
         api.destroy(run.name, delete_states=True, root=tmp_path)
 
     assert [call.args for call in cleanup.call_args_list] == [
-        ("lab-core-001", ["bootstrap"]),
-        ("lab-attack-002", ["bootstrap", "attacker"]),
-        ("lab-video-003", ["bootstrap", "videoserver"]),
+        ("lab-videoserver-001", ["bootstrap", "attacker", "videoserver"]),
+        ("lab-linuxmalware-002", ["bootstrap", "attacker", "videoserver"]),
+        ("lab-lateralmovement-003", ["bootstrap", "attacker", "repository"]),
     ]
 
 
 def test_runner_uses_each_scenarios_own_unit_list(tmp_path: Path) -> None:
     workspace(tmp_path)
     mapping = {
-        "lab-core-001": ["bootstrap"],
-        "lab-attack-002": ["bootstrap", "attacker"],
+        "lab-videoserver-001": ["bootstrap", "attacker", "videoserver"],
+        "lab-lateralmovement-002": ["bootstrap", "attacker", "repository"],
     }
     launched = []
     completed = []
@@ -149,8 +150,8 @@ def test_runner_uses_each_scenarios_own_unit_list(tmp_path: Path) -> None:
         ) == 0
 
     assert sorted(launched) == sorted([
-        ("lab-core-001", ["bootstrap"], "apply"),
-        ("lab-attack-002", ["bootstrap", "attacker"], "apply"),
+        ("lab-videoserver-001", ["bootstrap", "attacker", "videoserver"], "apply"),
+        ("lab-lateralmovement-002", ["bootstrap", "attacker", "repository"], "apply"),
     ])
     assert sorted(completed) == sorted(mapping)
 
@@ -184,10 +185,70 @@ def test_provider_vlan_setting_defaults_to_tfvars(tmp_path: Path) -> None:
     ) == 5
 
 
-def test_real_config_excludes_all_scenario() -> None:
+def test_real_config_matches_documented_scenarios() -> None:
     scenarios = api.all_scenario_units(api.ROOT)
     assert "all" not in scenarios
-    assert list(scenarios) == [
-        "core", "attack", "video", "demo", "repository",
-        "client", "lanturtle", "docker",
-    ]
+    assert "core" not in scenarios
+    assert api.scenario_units(api.ROOT, "core") == ["bootstrap"]
+    assert scenarios == {
+        "videoserver": ["bootstrap", "attacker", "videoserver"],
+        "linuxmalware": ["bootstrap", "attacker", "videoserver"],
+        "lateralmovement": ["bootstrap", "attacker", "repository"],
+        "network": ["bootstrap", "attacker", "repository"],
+        "lanturtle": ["bootstrap", "lanturtle"],
+        "client": ["bootstrap", "attacker", "client"],
+        "docker": ["bootstrap", "attacker", "docker"],
+    }
+
+
+def test_short_options_and_top_level_help(tmp_path: Path, capsys) -> None:
+    parser = cli.make_parser()
+    deploy_options = parser.parse_args([
+        "deploy", "-a", "-v", "-p", "7", "-t", "2",
+        "-c", "2", "-I", "101", "-n", "test", "-d",
+    ])
+    assert deploy_options.all_scenarios
+    assert deploy_options.no_provider_vlans
+    assert deploy_options.parallel_copies == 7
+    assert deploy_options.tofu_parallelism == 2
+    assert deploy_options.copies == 2
+    assert deploy_options.start_index == 101
+    assert deploy_options.prefix == "test"
+    assert deploy_options.debug
+
+    destroy_options = parser.parse_args([
+        "destroy", "videoserver", "-s", "-p", "3", "-t", "4", "-c", "2",
+    ])
+    assert destroy_options.delete_states
+    assert destroy_options.parallel_copies == 3
+    assert destroy_options.tofu_parallelism == 4
+    assert destroy_options.copies == 2
+    assert parser.parse_args(["deploy", "core", "-b"]).build
+    assert parser.parse_args(["deploy", "core", "-i", "images.json"]).images == Path("images.json")
+
+    with pytest.raises(SystemExit) as help_exit:
+        cli.main(["--help"], tmp_path)
+    assert help_exit.value.code == 0
+    help_text = capsys.readouterr().out
+    for expected in (
+        "-a, --all-scenarios", "-v, --no-provider-vlans",
+        "-s, --delete-states", "-p, --parallel-copies",
+        "-t, --tofu-parallelism", "-c, --copies", "-n, --prefix",
+        "-I, --start-index", "-b, --build", "-i, --images",
+        "-d, --debug", "deploy core",
+    ):
+        assert expected in help_text
+
+
+def test_short_switches_forward_correctly(tmp_path: Path) -> None:
+    with patch.object(api, "deploy") as deploy_api, patch.object(api, "destroy") as destroy_api:
+        cli.main(["deploy", "-a", "-v", "-p", "6", "-t", "3"], tmp_path)
+        assert deploy_api.call_args.kwargs["all_scenarios"] is True
+        assert deploy_api.call_args.kwargs["use_provider_vlans"] is False
+        assert deploy_api.call_args.kwargs["parallel_copies"] == 6
+        assert deploy_api.call_args.kwargs["tofu_parallelism"] == 3
+
+        cli.main(["destroy", "videoserver", "-c", "1", "-s", "-p", "2", "-t", "4"], tmp_path)
+        assert destroy_api.call_args.kwargs["delete_states"] is True
+        assert destroy_api.call_args.kwargs["parallel_copies"] == 2
+        assert destroy_api.call_args.kwargs["tofu_parallelism"] == 4

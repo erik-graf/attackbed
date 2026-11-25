@@ -7,7 +7,7 @@ From the AttackBed repository root:
 
 ```sh
 uv run attackbed --help
-uv run attackbed deploy demo --copies 2
+uv run attackbed deploy videoserver -c 2
 uv run --package attackbed-cli pytest scripts/attackbed/tests
 ```
 
@@ -25,7 +25,7 @@ See [CLI usage](../../docs/tools/attackbed.md) for commands and configuration.
 from attackbed import api
 
 run = api.build("all")
-run = api.deploy("demo", copies=2)
+run = api.deploy("videoserver", copies=2)
 run = api.resume(run.name)
 api.destroy(run.name, delete_states=True)
 ```
